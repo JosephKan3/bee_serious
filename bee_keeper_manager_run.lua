@@ -5,6 +5,14 @@
   upgrades installed, hovering at the Y level you want it to operate at.
 --]]
 
+-- Auto-update check (silent -- only interrupts if an update is actually
+-- available; harmless no-op without an internet card). Same pattern as
+-- Level-Maintainer's Maintainer.lua.
+pcall(function()
+  local shell = require("shell")
+  shell.execute("updater silent")
+end)
+
 local M = require("bee_keeper_manager")
 local Setup = require("bee_keeper_setup")
 local Nav = require("bee_keeper_nav")
