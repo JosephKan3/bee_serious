@@ -47,7 +47,7 @@ local BB = require("bee_breeding")
 local function deepCopyGenotype(genotype)
   local copy = {}
   for trait, alleles in pairs(genotype) do
-    copy[trait] = { allele1 = alleles.allele1, allele2 = alleles.allele2 }
+    copy[trait] = { active = alleles.active, inactive = alleles.inactive }
   end
   return copy
 end
@@ -55,9 +55,9 @@ end
 -- A parent contributes ONE of its two alleles per trait, chosen 50/50.
 local function pickAllele(alleles)
   if math.random() < 0.5 then
-    return alleles.allele1
+    return alleles.active
   else
-    return alleles.allele2
+    return alleles.inactive
   end
 end
 
@@ -66,8 +66,8 @@ local function crossGenotype(traitList, genotypeA, genotypeB)
   local child = {}
   for _, trait in ipairs(traitList) do
     child[trait] = {
-      allele1 = pickAllele(genotypeA[trait]),
-      allele2 = pickAllele(genotypeB[trait]),
+      active = pickAllele(genotypeA[trait]),
+      inactive = pickAllele(genotypeB[trait]),
     }
   end
   return child
@@ -79,9 +79,9 @@ local function makeGenotype(traitList, goodTraits)
   local genotype = {}
   for _, trait in ipairs(traitList) do
     if goodTraits[trait] then
-      genotype[trait] = { allele1 = "good", allele2 = "good" }
+      genotype[trait] = { active = "good", inactive = "good" }
     else
-      genotype[trait] = { allele1 = "bad", allele2 = "bad" }
+      genotype[trait] = { active = "bad", inactive = "bad" }
     end
   end
   return genotype
@@ -367,8 +367,11 @@ end
 -- ============================================================
 
 local seed = tonumber(arg and arg[1]) or os.time()
-local traitList = { "fertility", "speed", "lifespan", "territory", "flowering", "tolerance" }
-local badTrait = "fertility"
+-- Real Forestry/gendustry chromosome names, plus "species" tracked as just
+-- another trait (see bee_breeding.lua's header docs): "good" here means
+-- "matches the project's target species," "bad" means anything else.
+local traitList = { "fertility", "speed", "lifespan", "territory", "flowering", "temperatureTolerance", "species" }
+local badTrait = "species"
 
 -- Second arg: replay one specific failing trial by its trialSeed (as printed
 -- in a batch report's "reproduce a specific failure with..." lines), and
@@ -406,7 +409,7 @@ end
 -- Main batch: the exact motivating scenario, repeated many times.
 local mainReport = runBatch(traitList, badTrait, 10000, seed)
 
-printBatchReport("main scenario (6 traits, 'fertility' is the sole bad trait in the starting princess)", mainReport)
+printBatchReport("main scenario (7 loci incl. species; princess starts as a perfect bee of the wrong species)", mainReport)
 print("")
 
 -- Robustness sweep: vary trait count and which trait is the "bad" one.

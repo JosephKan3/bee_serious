@@ -3,11 +3,37 @@
   ------------------------------
   Assumes perfect information (all genotypes fully inspectable).
 
+  Field names (active/inactive, not allele1/allele2) match the real Forestry
+  genome layout as seen through OpenComputers/gendustry: an analyzed bee
+  exposes `individual.active[trait]` and `individual.inactive[trait]` for
+  each chromosome. Mirroring that here means genotypes read off a real bee
+  (via beeManager.lua-style scanning) can be fed straight into this module
+  with no translation step for the allele slots themselves.
+
   GENOTYPE FORMAT:
     genotype = {
-      [traitName] = { allele1 = "good"|"bad", allele2 = "good"|"bad" },
+      [traitName] = { active = "good"|"bad", inactive = "good"|"bad" },
       ...
     }
+
+  TRAITS TRACKED: any chromosome the project cares about, using the same
+  real names Forestry/gendustry uses -- e.g. "fertility", "speed",
+  "lifespan", "territory", "flowering", "temperatureTolerance",
+  "humidityTolerance", "caveDwelling", "nocturnal", "tolerantFlyer",
+  "flowerProvider", "effect".
+
+  SPECIES AS A TRAIT: in the real genome, species is just another
+  chromosome with its own active/inactive alleles (a bee's actual species
+  identity is active.species / inactive.species, a name string) -- it is
+  not structurally different from fertility or speed. This module tracks
+  it the exact same way: include "species" in traitList like any other
+  trait, with its allele values pre-reduced to "good" (matches whatever
+  species the current project is breeding toward) or "bad" (anything
+  else). That reduction -- deciding what "good" means for species on a
+  given project, i.e. the target species -- happens wherever genotypes are
+  built/normalized before reaching this module (not in here); scoreDrone,
+  selectBestDrone, shouldBank, and planGeneration all already work over an
+  arbitrary traitList and don't need to know species is special.
 
   BEE FORMAT:
     bee = {
@@ -31,11 +57,11 @@ local function traitState(genotype, traitName)
   if not t then
     error("Missing trait '" .. traitName .. "' in genotype")
   end
-  local a1good = (t.allele1 == "good")
-  local a2good = (t.allele2 == "good")
-  if a1good and a2good then
+  local activeGood = (t.active == "good")
+  local inactiveGood = (t.inactive == "good")
+  if activeGood and inactiveGood then
     return "GG"
-  elseif a1good or a2good then
+  elseif activeGood or inactiveGood then
     return "Gb"
   else
     return "bb"
