@@ -92,10 +92,28 @@ M.hasGoodAllele = hasGoodAllele
 --              reinforcing Gb toward GG is weighted second; preserving an
 --              already-GG trait gets only a small bonus (see isSafeDrone's
 --              docs for why this is deliberately soft, not a hard veto).
+-- traitWeights: optional { [traitName] = multiplier }. Every tier of a
+--              trait's contribution (bb-fill, Gb-reinforcement, and its
+--              GG-preserve bonus) is scaled by this multiplier -- default
+--              1 for any trait not listed (i.e. omitting this parameter
+--              entirely reproduces the old unweighted behavior exactly).
+--
+--              This exists for traits that are mechanically special, not
+--              just "one more thing to optimize" -- fertility is the
+--              motivating case: it's the litter size for every future
+--              cross, so a princess stuck at low fertility doesn't just
+--              score worse on one axis, it slows down (or in bad cases,
+--              stalls) EVERY OTHER trait's convergence too, by shrinking
+--              how many candidate offspring each generation produces to
+--              choose from. Weighting it higher (e.g. 3x) makes the
+--              algorithm fix and then protect fertility ahead of
+--              cosmetic-only traits whenever there's a choice, rather
+--              than treating a fertility gap as equally low-priority as,
+--              say, an unfixed flower-type gap.
 --
 -- Returns: numeric score (higher = better choice for this generation's cross)
 --
-function M.scoreDrone(traitList, princessGenotype, drone, endgameMode)
+function M.scoreDrone(traitList, princessGenotype, drone, endgameMode, traitWeights)
   local score = 0
 
   -- The "preserve an already-GG trait" bonus below is deliberately divided
@@ -107,26 +125,30 @@ function M.scoreDrone(traitList, princessGenotype, drone, endgameMode)
   -- mathematically outscore "introduce the one missing trait," recreating
   -- a permanent deadlock (confirmed via simulation at N=10 traits before
   -- this fix). Bounding the total keeps real progress always dominant.
+  -- (A heavily-weighted trait's preserve bonus can exceed this bound on
+  -- its own, which is intentional -- see traitWeights above.)
   local preserveBonusPerTrait = 0.5 / #traitList
 
   for _, trait in ipairs(traitList) do
     local pState = traitState(princessGenotype, trait)
     local dState = traitState(drone.genotype, trait)
+    local weight = (traitWeights and traitWeights[trait]) or 1
+    local traitScore = 0
 
     if pState == "bb" then
       -- Critical gap: any good allele from drone is high value.
       if dState == "GG" then
-        score = score + 4   -- best possible: guarantees a good allele passes on
+        traitScore = 4   -- best possible: guarantees a good allele passes on
       elseif dState == "Gb" then
-        score = score + 3
+        traitScore = 3
       end
     elseif pState == "Gb" then
       -- Needs reinforcement toward GG.
       if dState == "GG" then
-        score = score + 2   -- guarantees offspring gets a good allele here;
-                             -- 50% chance of full GG lock-in this generation
+        traitScore = 2   -- guarantees offspring gets a good allele here;
+                         -- 50% chance of full GG lock-in this generation
       elseif dState == "Gb" then
-        score = score + 1
+        traitScore = 1
       end
       -- dState == "bb" contributes 0 (drone offers nothing new here)
     elseif pState == "GG" then
@@ -135,9 +157,11 @@ function M.scoreDrone(traitList, princessGenotype, drone, endgameMode)
       -- drone that would de-fix this trait can still win on other traits'
       -- weight, which is intentional (see isSafeDrone's docs).
       if dState == "GG" then
-        score = score + preserveBonusPerTrait
+        traitScore = preserveBonusPerTrait
       end
     end
+
+    score = score + traitScore * weight
   end
 
   return score
@@ -184,7 +208,8 @@ function M.isSafeDrone(traitList, princessGenotype, drone)
   return true
 end
 
-function M.selectBestDrone(traitList, princessGenotype, dronePool, endgameMode)
+-- traitWeights: optional, forwarded to scoreDrone (see its docs).
+function M.selectBestDrone(traitList, princessGenotype, dronePool, endgameMode, traitWeights)
   if #dronePool == 0 then
     return nil, 0, {}
   end
@@ -193,7 +218,7 @@ function M.selectBestDrone(traitList, princessGenotype, dronePool, endgameMode)
   local bestDrone, bestScore = nil, -math.huge
 
   for _, drone in ipairs(dronePool) do
-    local s = M.scoreDrone(traitList, princessGenotype, drone, endgameMode)
+    local s = M.scoreDrone(traitList, princessGenotype, drone, endgameMode, traitWeights)
     table.insert(allScores, { drone = drone, score = s, safe = M.isSafeDrone(traitList, princessGenotype, drone) })
 
     if s > bestScore then
@@ -293,9 +318,12 @@ end
 --   }
 --
 -- minCopies: optional, forwarded to shouldBank (default 2 -- see its docs).
+-- traitWeights: optional, forwarded to selectBestDrone/scoreDrone (see
+--               scoreDrone's docs -- this is where you'd pass e.g.
+--               { fertility = 3 } to keep fertility a selection priority).
 --
-function M.planGeneration(traitList, princessGenotype, dronePool, bankedDrones, endgameMode, minCopies)
-  local best, bestScore = M.selectBestDrone(traitList, princessGenotype, dronePool, endgameMode)
+function M.planGeneration(traitList, princessGenotype, dronePool, bankedDrones, endgameMode, minCopies, traitWeights)
+  local best, bestScore = M.selectBestDrone(traitList, princessGenotype, dronePool, endgameMode, traitWeights)
 
   local toBank, toDiscard = {}, {}
 

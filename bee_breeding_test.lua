@@ -138,6 +138,13 @@ end
 --                     (which shows literally zero change forever, so any
 --                     threshold catches it eventually).
 --   verbose           print a generation-by-generation log
+--   traitWeights      optional, forwarded to BB.planGeneration (see
+--                     bee_breeding.lua's scoreDrone docs)
+--   trackRecovery     if true, record per-trait "generations spent away
+--                     from GG after having reached it once" -- used to
+--                     empirically check that a weighted trait (e.g.
+--                     fertility) actually gets re-fixed faster than
+--                     unweighted ones after a random regression
 --
 local function runTrial(traitList, badTrait, opts)
   opts = opts or {}
@@ -146,6 +153,8 @@ local function runTrial(traitList, badTrait, opts)
   local maxGenerations = opts.maxGenerations or 400
   local stagnationLimit = opts.stagnationLimit or 30
   local verbose = opts.verbose or false
+  local traitWeights = opts.traitWeights
+  local trackRecovery = opts.trackRecovery or false
 
   local goodSetA = {}
   for _, t in ipairs(traitList) do
@@ -169,6 +178,21 @@ local function runTrial(traitList, badTrait, opts)
   local phenotypeLossEvents = 0
   local phenotypeRecoveryEvents = 0
 
+  -- Recovery tracking (only used if trackRecovery): per trait, the
+  -- generation it most recently dropped OFF of GG (nil if not currently
+  -- away from GG, or never dropped since last recovering), and accumulated
+  -- {sum, count} of completed drop->return spans.
+  local dropGen = {}
+  local recoveryDurations = {}
+  if trackRecovery then
+    for _, t in ipairs(traitList) do
+      recoveryDurations[t] = { sum = 0, count = 0 }
+      if BB.traitState(princessGenotype, t) ~= "GG" then
+        dropGen[t] = 0
+      end
+    end
+  end
+
   if verbose then
     print(string.format("[trial] bad trait = %s | traits = %s", badTrait, table.concat(traitList, ",")))
     print(string.format("gen 0: princess [%s]", traitSummary(traitList, princessGenotype)))
@@ -177,7 +201,8 @@ local function runTrial(traitList, badTrait, opts)
   for gen = 1, maxGenerations do
     if BB.isPurebred(traitList, princessGenotype) then
       return { success = true, generations = gen - 1, stuck = false, permanentLoss = false,
-               phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents }
+               phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents,
+               recoveryDurations = trackRecovery and recoveryDurations or nil }
     end
 
     -- This generation's pool: everything banked, plus (gen 1 only) fresh
@@ -197,11 +222,11 @@ local function runTrial(traitList, badTrait, opts)
     for _, t in ipairs(traitList) do statesBefore[t] = BB.traitState(princessGenotype, t) end
 
     local endgame = BB.isPhenotypicallyPerfect(traitList, princessGenotype)
-    local plan = BB.planGeneration(traitList, princessGenotype, dronePool, {}, endgame)
+    local plan = BB.planGeneration(traitList, princessGenotype, dronePool, {}, endgame, nil, traitWeights)
 
     if not plan.breedWith then
       return { success = false, generations = gen, stuck = true, permanentLoss = false,
-               reason = "no_drone_available" }
+               reason = "no_drone_available", recoveryDurations = trackRecovery and recoveryDurations or nil }
     end
 
     if verbose then
@@ -226,6 +251,17 @@ local function runTrial(traitList, badTrait, opts)
       local after = BB.traitState(newPrincessGenotype, t)
       if before ~= "bb" and after == "bb" then phenotypeLossEvents = phenotypeLossEvents + 1 end
       if before == "bb" and after ~= "bb" then phenotypeRecoveryEvents = phenotypeRecoveryEvents + 1 end
+
+      if trackRecovery then
+        if before == "GG" and after ~= "GG" then
+          dropGen[t] = gen
+        elseif after == "GG" and dropGen[t] ~= nil then
+          local d = recoveryDurations[t]
+          d.sum = d.sum + (gen - dropGen[t])
+          d.count = d.count + 1
+          dropGen[t] = nil
+        end
+      end
     end
 
     -- Carry forward next generation's pool: survivors + fresh litter.
@@ -251,7 +287,8 @@ local function runTrial(traitList, badTrait, opts)
         if not recoverable then
           return { success = false, generations = gen, stuck = false, permanentLoss = true,
                    reason = "permanently_lost_allele:" .. t,
-                   phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents }
+                   phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents,
+                   recoveryDurations = trackRecovery and recoveryDurations or nil }
         end
       end
     end
@@ -268,18 +305,21 @@ local function runTrial(traitList, badTrait, opts)
       return { success = false, generations = gen, stuck = true, permanentLoss = false,
                reason = "no_genetic_change_for_" .. stagnationLimit .. "_generations",
                finalState = traitSummary(traitList, princessGenotype),
-               phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents }
+               phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents,
+               recoveryDurations = trackRecovery and recoveryDurations or nil }
     end
   end
 
   if BB.isPurebred(traitList, princessGenotype) then
     return { success = true, generations = maxGenerations, stuck = false, permanentLoss = false,
-             phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents }
+             phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents,
+             recoveryDurations = trackRecovery and recoveryDurations or nil }
   end
 
   return { success = false, generations = maxGenerations, stuck = true, permanentLoss = false,
            reason = "max_generations_reached", finalState = traitSummary(traitList, princessGenotype),
-           phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents }
+           phenotypeLossEvents = phenotypeLossEvents, phenotypeRecoveryEvents = phenotypeRecoveryEvents,
+           recoveryDurations = trackRecovery and recoveryDurations or nil }
 end
 
 -- ============================================================
@@ -433,5 +473,52 @@ for cfgIdx, cfg in ipairs(sweepConfigs) do
   end
 end
 print("(sweep configs with 100% success across all bad-trait positions are omitted above for brevity)")
+print("")
 
-BB.isSafeDrone = originalIsSafeDrone
+-- ============================================================
+-- Experiment: does weighting fertility actually make it recover faster
+-- after a random regression, compared to leaving it unweighted?
+-- ============================================================
+-- Measures, per trait, the average number of generations spent away from
+-- GG after having reached it at least once (a "drop -> return" span).
+-- Random princess succession means every trait occasionally regresses by
+-- chance (see bee_breeding_test.lua's header docs); the question is
+-- whether bee_trait_config.lua's fertility=3 weight actually shortens
+-- fertility's average recovery time relative to comparable unweighted
+-- traits, not just in theory but in this exact simulation.
+local function runRecoveryExperiment(traitList, badTrait, trials, baseSeed, traitWeights)
+  local totals = {}
+  for _, t in ipairs(traitList) do totals[t] = { sum = 0, count = 0 } end
+
+  for i = 1, trials do
+    math.randomseed(trialSeedFor(baseSeed, i))
+    local result = runTrial(traitList, badTrait, { traitWeights = traitWeights, trackRecovery = true })
+    if result.recoveryDurations then
+      for _, t in ipairs(traitList) do
+        local d = result.recoveryDurations[t]
+        totals[t].sum = totals[t].sum + d.sum
+        totals[t].count = totals[t].count + d.count
+      end
+    end
+  end
+
+  local avgs = {}
+  for _, t in ipairs(traitList) do
+    avgs[t] = totals[t].count > 0 and (totals[t].sum / totals[t].count) or nil
+  end
+  return avgs
+end
+
+print("---- experiment: does fertility=3 weighting speed up its recovery? ----")
+local recoveryTraits = { "fertility", "speed", "lifespan", "territory", "flowering", "temperatureTolerance" }
+local recoveryTrials = 3000
+
+local unweighted = runRecoveryExperiment(recoveryTraits, "flowering", recoveryTrials, seed + 900001, nil)
+local weighted = runRecoveryExperiment(recoveryTraits, "flowering", recoveryTrials, seed + 900001, { fertility = 3 })
+
+print(string.format("%-24s %12s %12s", "trait", "unweighted", "fertility=3"))
+for _, t in ipairs(recoveryTraits) do
+  print(string.format("%-24s %12s %12s", t,
+    unweighted[t] and string.format("%.2f gens", unweighted[t]) or "n/a",
+    weighted[t] and string.format("%.2f gens", weighted[t]) or "n/a"))
+end

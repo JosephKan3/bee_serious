@@ -140,6 +140,25 @@ M.allTraits = {
   "tolerantFlyer", "caveDwelling", "effect", "territory",
 }
 
+-- Per-trait scoring multipliers, forwarded to bee_breeding.lua's
+-- scoreDrone/selectBestDrone/planGeneration as traitWeights. Any trait not
+-- listed here defaults to weight 1 (bee_breeding.lua's normal behavior).
+--
+-- fertility gets a deliberate boost: it isn't just one more trait to
+-- optimize, it's the litter size for every future cross. A princess stuck
+-- at low fertility doesn't just score worse on one axis -- she produces
+-- fewer candidate offspring every single generation, which slows down (or
+-- in unlucky cases, stalls) convergence on EVERY other trait too, and
+-- shrinks the odds of ever finding/keeping the insurance copies liberal
+-- banking relies on. 3x makes fertility-bb-fill (4 * 3 = 12) outscore
+-- introducing any other single missing trait (4) by a wide margin, so the
+-- algorithm fixes and then protects fertility ahead of purely cosmetic
+-- traits whenever there's a choice. Tune this if 3x proves too aggressive
+-- or not aggressive enough for your actual trait mix.
+M.weights = {
+  fertility = 3,
+}
+
 -- Given a trait's target spec and a raw allele value (as it appears in
 -- bee.individual.active[trait] / .inactive[trait]), return true if that
 -- value counts as "good".
