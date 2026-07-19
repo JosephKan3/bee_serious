@@ -45,12 +45,15 @@
       beeManager.lua's big storage-chest catalog; there's no room for that
       here, so the pool is just whatever fits in cargo at once.
 
-  NOT IMPLEMENTED YET (per "movement mechanism, later"): Nav.gotoSite below
-  is a stub that assumes the agent is ALREADY adjacent to the site. Fill it
-  in once travel is built -- nothing else here needs to change, since every
-  interaction is side-relative from wherever the agent currently is.
+  MOVEMENT: sites are (x,z) positions at one fixed Y level (see
+  bee_keeper_nav.lua) -- the drone flies DIRECTLY above each apiary and
+  always interacts via sides.down, never side-relative horizontal offsets.
+  Site positions come from bee_keeper_setup.lua's area scan, persisted to
+  disk; see M.loadSites for how those get merged with the mode/
+  targetSpecies assignments you configure by hand.
 
-  THREE MODES (per site, set in config.sites[n].mode):
+  THREE MODES (per site, set via config.siteOverrides[name].mode, default
+  "traitmax" for anything not overridden):
     "traitmax" -- no species target. Get as close to a max-trait bee as
                   possible from whatever's on hand; species is untracked.
                   This is the fallback/default: even if parents have no
@@ -74,8 +77,10 @@
 
 local BB = require("bee_breeding")
 local Cfg = require("bee_trait_config")
+local Nav = require("bee_keeper_nav")
 
 local M = {}
+M.Nav = Nav
 
 -- ============================================================
 -- Hardware access (lazy -- resolved on first use, not at require time, so
@@ -152,20 +157,14 @@ function M.traitListFor(mode)
 end
 
 -- ============================================================
--- Movement (STUB -- see header notes)
+-- Movement: sites are (x,z) at the fixed flight altitude; always
+-- interact via sides.down once positioned directly above.
 -- ============================================================
 
-local Nav = {}
-M.Nav = Nav
-
--- Get the agent adjacent to `site` and facing the apiary correctly.
--- TODO: not implemented -- assumes the agent is already in position.
--- Replace this with real travel logic; nothing else in this file depends
--- on how that's done, since every hardware call below is already
--- side-relative from wherever the agent currently is.
-function Nav.gotoSite(site)
-  return true
+local function gotoSite(site)
+  return Nav.gotoXZ(site.x, site.z)
 end
+M.gotoSite = gotoSite
 
 -- ============================================================
 -- Core per-site cycle: traitmax / species modes
@@ -192,16 +191,18 @@ end
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
 -- Returns a short status string for logging.
 function M.runQualitySite(config, site)
-  if not Nav.gotoSite(site) then return "nav_failed" end
+  local ok, reason = gotoSite(site)
+  if not ok then return "nav_failed:" .. tostring(reason) end
 
+  local down = sides().down
   local traitList = M.traitListFor(site.mode)
   local targetSpecies = site.targetSpecies
 
-  if beekeeper().canWork(site.side) then
-    return string.format("working (%.0f%%)", beekeeper().getBeeProgress(site.side))
+  if beekeeper().canWork(down) then
+    return string.format("working (%.0f%%)", beekeeper().getBeeProgress(down))
   end
 
-  local princessIndividual = M.readSideSlot(site.side, 1)
+  local princessIndividual = M.readSideSlot(down, 1)
   if not princessIndividual then
     return "no_princess_at_site"
   end
@@ -220,21 +221,25 @@ function M.runQualitySite(config, site)
     return "no_viable_drone"
   end
 
-  -- Discard drones the plan doesn't want, to make room -- physically means
-  -- ejecting them (left as a TODO hook: config.onDiscard(bee) if you want
-  -- to route them to a sampler/furnace/junk chest instead of just leaving
-  -- them in place).
-  if config.onDiscard then
-    for _, entry in ipairs(plan.toDiscard) do
-      if entry.drone.id ~= plan.breedWith.id then
+  -- Discard drones the plan doesn't want, to make room. Default behavior:
+  -- fly them to config.storagePos and drop them there (see M.dumpToStorage)
+  -- -- override config.onDiscard to route elsewhere (sampler/furnace/junk).
+  local discardCount = 0
+  for _, entry in ipairs(plan.toDiscard) do
+    if entry.drone.id ~= plan.breedWith.id then
+      discardCount = discardCount + 1
+      if config.onDiscard then
         config.onDiscard(entry.drone)
       end
     end
   end
+  if discardCount > 0 and not config.onDiscard and config.storagePos then
+    M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
+  end
 
   agent().select(plan.breedWith._slot)
-  local ok = beekeeper().swapDrone(site.side)
-  if not ok then return "swap_drone_failed" end
+  local swapped = beekeeper().swapDrone(down)
+  if not swapped then return "swap_drone_failed" end
 
   return string.format("loaded drone (score %.1f)", plan.score)
 end
@@ -331,10 +336,12 @@ end
 
 -- Runs one decision+action cycle for a "mutation" site.
 function M.runMutationSite(config, site)
-  if not Nav.gotoSite(site) then return "nav_failed" end
+  local ok, reason = gotoSite(site)
+  if not ok then return "nav_failed:" .. tostring(reason) end
 
-  if beekeeper().canWork(site.side) then
-    return string.format("attempting (%.0f%%)", beekeeper().getBeeProgress(site.side))
+  local down = sides().down
+  if beekeeper().canWork(down) then
+    return string.format("attempting (%.0f%%)", beekeeper().getBeeProgress(down))
   end
 
   -- Once a mutation succeeds, some harvested offspring will be
@@ -354,9 +361,9 @@ function M.runMutationSite(config, site)
   end
 
   agent().select(plan.princessSlot)
-  if not beekeeper().swapQueen(site.side) then return "swap_queen_failed" end
+  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
   agent().select(plan.droneSlot)
-  if not beekeeper().swapDrone(site.side) then return "swap_drone_failed" end
+  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
 
   return string.format("attempting mutation %s x %s (%.0f%% base chance)",
     plan.princessSpecies, plan.droneSpecies, plan.chance)
@@ -372,19 +379,50 @@ end
 -- inventory_controller.suckFromSlot instead of a transposer).
 function M.harvestSite(config, site, productSlots)
   productSlots = productSlots or config.productSlots or { 7, 8, 9, 10, 11, 12, 13, 14, 15 }
-  if not Nav.gotoSite(site) then return 0 end
+  local ok = gotoSite(site)
+  if not ok then return 0 end
 
+  local down = sides().down
   local harvested = 0
   for _, productSlot in ipairs(productSlots) do
     for _, workingSlot in ipairs(config.workingSlots) do
       if M.readOwnSlot(workingSlot) == nil then
-        local moved = invCtrl().suckFromSlot(site.side, productSlot, 1, nil)
+        local moved = invCtrl().suckFromSlot(down, productSlot, 1, nil)
         if moved and moved > 0 then harvested = harvested + 1 end
         break
       end
     end
   end
   return harvested
+end
+
+-- ============================================================
+-- Storage: fly discarded drones to config.storagePos and drop them in a
+-- plain chest (MVP -- see bee_keeper_manager_config.lua). Default discard
+-- destination when config.onDiscard isn't set.
+-- ============================================================
+
+function M.dumpToStorage(config, discardEntries, keepId)
+  if not config.storagePos then return 0 end
+  local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
+  if not ok then return 0 end
+
+  local down = sides().down
+  local dropped = 0
+  for _, entry in ipairs(discardEntries) do
+    if entry.drone.id ~= keepId and entry.drone._slot then
+      agent().select(entry.drone._slot)
+      for storageSlot = 1, (config.storageSlotCount or 54) do
+        if invCtrl().getStackInSlot(down, storageSlot) == nil then
+          if invCtrl().dropIntoSlot(down, storageSlot) then
+            dropped = dropped + 1
+          end
+          break
+        end
+      end
+    end
+  end
+  return dropped
 end
 
 -- ============================================================
@@ -405,21 +443,48 @@ function M.analyzeWorkingSlots(config)
 end
 
 -- ============================================================
+-- Site loading: merges bee_keeper_setup.lua's persisted (x,z) discoveries
+-- with the mode/targetSpecies assignments you configure by hand, keyed by
+-- site name (site1, site2, ... as assigned during the scan). Anything not
+-- explicitly overridden defaults to "traitmax".
+-- ============================================================
+
+function M.loadSites(savedSites, siteOverrides)
+  siteOverrides = siteOverrides or {}
+  local sites = {}
+  for _, s in ipairs(savedSites) do
+    local override = siteOverrides[s.name] or {}
+    table.insert(sites, {
+      name = s.name,
+      x = s.x,
+      z = s.z,
+      mode = override.mode or "traitmax",
+      targetSpecies = override.targetSpecies,
+    })
+  end
+  return sites
+end
+
+-- ============================================================
 -- Main cycle
 -- ============================================================
 
 -- Runs one full pass over every configured site: harvest, analyze, then
--- dispatch to the right mode's decision function.
+-- dispatch to the right mode's decision function. Sites are visited in
+-- nearest-neighbor order from wherever the drone currently is (your
+-- call -- direct flight, minimize travel, not fixed list order).
 function M.runCycle(config)
   local log = {}
+  local orderedSites = Nav.orderByProximity(config.sites)
 
-  for _, site in ipairs(config.sites) do
+  for _, site in ipairs(orderedSites) do
     M.harvestSite(config, site)
   end
 
   M.analyzeWorkingSlots(config)
 
-  for _, site in ipairs(config.sites) do
+  orderedSites = Nav.orderByProximity(config.sites)
+  for _, site in ipairs(orderedSites) do
     local status
     if site.mode == "traitmax" then
       status = M.runQualitySite(config, site)
@@ -431,6 +496,12 @@ function M.runCycle(config)
       status = "unknown_mode:" .. tostring(site.mode)
     end
     table.insert(log, string.format("[%s] %s: %s", site.mode, site.name or "?", status))
+  end
+
+  if config.needCharge == nil or config.needCharge then
+    if Nav.needCharge(config.chargeThreshold) then
+      Nav.chargeAtHome(config.chargerPos)
+    end
   end
 
   return log

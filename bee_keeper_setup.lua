@@ -1,0 +1,266 @@
+--[[
+  Bee Keeper Setup
+  -----------------
+  Interactive first-run area scan: ask for an X*Z area at the drone's
+  current Y level, preview the boundary (ASCII + fly-the-4-corners with a
+  light flash), then sweep the whole area in a boustrophedon (zigzag)
+  pattern -- same traversal shape as GTNH-CropAutomation's farm-slot
+  pattern -- identifying apiary and storage-container blocks via the
+  Geolyzer (component.geolyzer.analyze(sides.down), same call scanner.lua
+  uses for crop identification). Discovered positions are persisted so
+  this only needs to run once; skip entirely if a saved file already
+  exists, or by entering nothing when prompted.
+
+  BLOCK IDENTIFICATION IS UNCONFIRMED -- I don't have decompiled Forestry
+  source to read off the exact block registry names, so
+  config.apiaryBlockNames / config.storageBlockNames are best-guess
+  defaults you should verify. Use M.probeBlockBelow() (see bottom) to
+  print the real geolyzer.analyze() result while hovering over a KNOWN
+  apiary or storage block, and adjust the config's name lists to match --
+  exactly the same "verify against real data" step that caught the
+  species/tolerance/flowerProvider mismatches in bee_trait_config.lua
+  earlier in this project.
+--]]
+
+local Nav = require("bee_keeper_nav")
+
+local M = {}
+
+local function component() return require("component") end
+local function sides() return require("sides") end
+local function serialization() return require("serialization") end
+
+-- ============================================================
+-- Persistence (same loadFile/saveFile convention as the old beeManager.lua)
+-- ============================================================
+
+local function loadFile(fileName)
+  local f = io.open(fileName, "r")
+  if f == nil then return nil end
+  local data = f:read("*all")
+  f:close()
+  return serialization().unserialize(data)
+end
+
+local function saveFile(fileName, data)
+  local f = io.open(fileName, "w")
+  f:write(serialization().serialize(data))
+  f:close()
+end
+
+M.SITES_FILE = "bee_keeper_sites.dat"
+
+-- ============================================================
+-- Block classification
+-- ============================================================
+
+-- names: array of exact-match block name strings (see header notes on
+-- these being unconfirmed defaults).
+local function matchesAny(blockName, names)
+  if not blockName then return false end
+  for _, n in ipairs(names) do
+    if blockName == n then return true end
+  end
+  return false
+end
+
+-- Prints the raw geolyzer.analyze() result for the block directly below
+-- the drone's CURRENT position -- call this manually while hovering over
+-- a known apiary or storage block to get the real name string for your
+-- config, before trusting the automated scan.
+function M.probeBlockBelow()
+  local result = component().geolyzer.analyze(sides().down)
+  print("geolyzer.analyze(down) result:")
+  for k, v in pairs(result) do
+    print(string.format("  %s = %s", tostring(k), tostring(v)))
+  end
+  return result
+end
+
+-- ============================================================
+-- Interactive prompts
+-- ============================================================
+
+local function promptNumber(question, allowBlankSkip)
+  io.write(question)
+  local line = io.read()
+  if line == nil or line == "" then
+    return nil
+  end
+  local n = tonumber(line)
+  if n == nil then
+    print("Not a number, try again.")
+    return promptNumber(question, allowBlankSkip)
+  end
+  return n
+end
+
+local function promptYesNo(question, default)
+  io.write(question)
+  local line = io.read()
+  if line == nil or line == "" then return default end
+  line = line:lower()
+  return line == "y" or line == "yes"
+end
+
+-- ============================================================
+-- Border preview
+-- ============================================================
+
+local function printAsciiPreview(width, depth)
+  print(string.format("Planned scan area: %d x %d (starting at the drone's current position, (0,0)):", width, depth))
+  local maxCols = 40
+  local scaleX = width > maxCols and (maxCols / width) or 1
+  local scaleZ = depth > (maxCols / 2) and ((maxCols / 2) / depth) or 1
+  local cols = math.max(2, math.floor(width * scaleX))
+  local rows = math.max(1, math.floor(depth * scaleZ))
+
+  print(" (0,0) +" .. string.rep("-", cols) .. "+")
+  for _ = 1, rows do
+    print("       |" .. string.rep(" ", cols) .. "|")
+  end
+  print("       +" .. string.rep("-", cols) .. string.format("+ (%d,%d)", width, depth))
+end
+
+-- Flies to all 4 corners of the planned area (relative to current
+-- position as origin), flashing the drone's light at each, then returns
+-- to the start. Lets you visually confirm the boundary in-world before
+-- committing to the full sweep.
+local function flyBorderPreview(width, depth)
+  local corners = { { 0, 0 }, { width, 0 }, { width, depth }, { 0, depth }, { 0, 0 } }
+  local d = component().drone
+  local originalColor = d.getLightColor()
+
+  for i, c in ipairs(corners) do
+    print(string.format("Flying to corner %d/%d: (%d, %d)", i, #corners, c[1], c[2]))
+    local ok, reason = Nav.gotoXZ(c[1], c[2])
+    if not ok then
+      print("  Could not reach corner: " .. tostring(reason))
+    else
+      d.setLightColor(0x00FF00)
+      os.sleep(0.5)
+      d.setLightColor(0xFF0000)
+      os.sleep(0.5)
+    end
+  end
+  d.setLightColor(originalColor)
+end
+
+-- ============================================================
+-- Area sweep
+-- ============================================================
+
+-- Boustrophedon (zigzag) cell order -- same traversal shape as
+-- GTNH-CropAutomation's workingSlotToPos, adapted to arbitrary width/depth
+-- instead of a fixed square.
+local function sweepCells(width, depth)
+  local cells = {}
+  for x = 0, width - 1 do
+    if x % 2 == 0 then
+      for z = 0, depth - 1 do table.insert(cells, { x, z }) end
+    else
+      for z = depth - 1, 0, -1 do table.insert(cells, { x, z }) end
+    end
+  end
+  return cells
+end
+
+-- Sweeps the whole area, classifying the block below at each cell.
+-- Returns { apiarySites = {{x,z},...}, storageSites = {{x,z},...} }.
+function M.scanArea(config, width, depth)
+  local geolyzer = component().geolyzer
+  local downSide = sides().down
+
+  local apiarySites, storageSites = {}, {}
+  local cells = sweepCells(width, depth)
+
+  for i, cell in ipairs(cells) do
+    local ok = Nav.gotoXZ(cell[1], cell[2])
+    if ok then
+      local result = geolyzer.analyze(downSide)
+      local blockName = result and result.name
+      if matchesAny(blockName, config.apiaryBlockNames) then
+        table.insert(apiarySites, { x = cell[1], z = cell[2] })
+      elseif matchesAny(blockName, config.storageBlockNames) then
+        table.insert(storageSites, { x = cell[1], z = cell[2] })
+      end
+    else
+      print(string.format("Skipped cell (%d,%d): could not reach it", cell[1], cell[2]))
+    end
+
+    if i % 10 == 0 then
+      print(string.format("Scanned %d/%d cells -- %d apiaries, %d storage candidates so far",
+        i, #cells, #apiarySites, #storageSites))
+    end
+  end
+
+  return { apiarySites = apiarySites, storageSites = storageSites }
+end
+
+-- ============================================================
+-- Main entry point
+-- ============================================================
+
+-- config: needs apiaryBlockNames, storageBlockNames (see header notes).
+-- Returns the saved-sites table ({ sites = {...}, storagePos = {...} or
+-- nil, width=.., depth=.. }), or nil if the user skipped setup with no
+-- existing file to fall back on.
+function M.run(config)
+  local existing = loadFile(M.SITES_FILE)
+  if existing then
+    print(string.format("Found existing site config (%d apiaries, storage %s). Press Enter to keep it, or type 'rescan' to redo:",
+      #existing.sites, existing.storagePos and "found" or "not found"))
+    local line = io.read()
+    if line ~= "rescan" then
+      return existing
+    end
+  end
+
+  local width = promptNumber("Scan width, X blocks (blank to skip setup): ")
+  if width == nil then
+    return existing -- nil if there was nothing saved either
+  end
+  local depth = promptNumber("Scan depth, Z blocks: ")
+  if depth == nil then
+    print("No depth given, aborting setup.")
+    return existing
+  end
+
+  Nav.setHome(nil) -- altitude locked to wherever the drone currently is
+  printAsciiPreview(width, depth)
+
+  if config.showBorderPreview ~= false then
+    flyBorderPreview(width, depth)
+  end
+
+  if not promptYesNo("Does the boundary look right? [Y/n]: ", true) then
+    print("Aborted -- rerun setup once you've repositioned.")
+    return existing
+  end
+
+  print("Scanning...")
+  local result = M.scanArea(config, width, depth)
+  Nav.gotoXZ(0, 0)
+
+  local sites = {}
+  for i, s in ipairs(result.apiarySites) do
+    table.insert(sites, { name = "site" .. i, x = s.x, z = s.z, mode = "traitmax" })
+  end
+
+  local storagePos = result.storageSites[1]
+  if #result.storageSites > 1 then
+    print(string.format("Found %d storage candidates, using the first at (%d,%d). Edit %s to change.",
+      #result.storageSites, storagePos.x, storagePos.z, M.SITES_FILE))
+  end
+
+  local saved = { sites = sites, storagePos = storagePos, width = width, depth = depth }
+  saveFile(M.SITES_FILE, saved)
+  print(string.format("Saved %d apiary sites%s to %s.", #sites,
+    storagePos and " and 1 storage location" or " (no storage container found)", M.SITES_FILE))
+  print("Every discovered site defaults to traitmax mode -- edit " .. M.SITES_FILE ..
+    " (or bee_keeper_manager_config.lua's siteOverrides) to assign species/mutation targets.")
+
+  return saved
+end
+
+return M

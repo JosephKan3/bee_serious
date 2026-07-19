@@ -2,34 +2,55 @@
   Mock-based tests for bee_keeper_manager.lua.
 
   There's no OpenComputers/Minecraft runtime to test against here, so this
-  fakes "component" and "sides" (the only two hardware-touching requires)
-  with an in-memory simulated world: a table of apiary slots per side, and
-  a table of the agent's own inventory slots. bee_keeper_manager's actual
-  decision logic (which drone to pick, which mutation pair to load, etc.)
-  runs for real against these fakes -- only the world I/O is simulated, not
-  the logic being tested.
+  fakes "component", "sides", and "bee_keeper_nav" (the only hardware-
+  touching requires) with an in-memory simulated world: a table of apiary
+  slots keyed by (droneX, droneZ, side) -- mirroring how the real
+  UpgradeBeekeeperUtil resolves position.offset(facing) from wherever the
+  agent currently is -- plus a table of the agent's own inventory slots.
+  bee_keeper_manager's actual decision logic (which drone to pick, which
+  mutation pair to load, etc.) runs for real against these fakes -- only
+  world I/O and flight are simulated, not the logic being tested. Nav's
+  own geometry (orderByProximity, gotoXZ arrival/stuck detection) is
+  tested separately in bee_keeper_nav_test.lua against the real module.
 --]]
 
 -- ============================================================
--- Fakes: sides, component
+-- Fakes: sides, component, bee_keeper_nav
 -- ============================================================
 
 package.loaded["sides"] = {
   north = 2, south = 3, east = 4, west = 5, up = 0, down = 1,
 }
+local DOWN = 1
 
 local world = {
-  apiaries = {},  -- [side] = { [slot] = stack }
+  apiaries = {},  -- ["x:z:side"] = { [slot] = stack }
   agentInventory = {},  -- [slot] = stack
   selectedSlot = 1,
   analyzeCalls = 0,
-  honey = 64,
+  dronePos = { x = 0, z = 0 },
 }
 
 local function apiary(side)
-  world.apiaries[side] = world.apiaries[side] or {}
-  return world.apiaries[side]
+  local key = world.dronePos.x .. ":" .. world.dronePos.z .. ":" .. side
+  world.apiaries[key] = world.apiaries[key] or {}
+  return world.apiaries[key]
 end
+
+-- Fake nav: instantly "arrives" and tracks position for apiary() to key
+-- off of. Real Nav geometry (proximity ordering, stuck detection) is
+-- tested against the real module in bee_keeper_nav_test.lua.
+package.loaded["bee_keeper_nav"] = {
+  setHome = function() end,
+  setAltitude = function() return true end,
+  getPos = function() return { x = world.dronePos.x, z = world.dronePos.z } end,
+  gotoXZ = function(x, z) world.dronePos = { x = x, z = z }; return true end,
+  gotoHome = function() world.dronePos = { x = 0, z = 0 }; return true end,
+  orderByProximity = function(sites) return sites end, -- keep list order for test determinism
+  needCharge = function() return false end,
+  isFullyCharged = function() return true end,
+  chargeAtHome = function() end,
+}
 
 local function makeAlleles(traitList, goodTraits)
   local active, inactive = {}, {}
@@ -78,6 +99,13 @@ mockComponent.inventory_controller = {
       end
     end
     return 0
+  end,
+  dropIntoSlot = function(side, slot)
+    local stack = world.agentInventory[world.selectedSlot]
+    if not stack then return false end
+    apiary(side)[slot] = stack
+    world.agentInventory[world.selectedSlot] = nil
+    return true
   end,
 }
 
@@ -171,6 +199,7 @@ end
 do
   world.apiaries = {}
   world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
 
   local traitList = M.traitListFor("traitmax")
   -- Princess: good at everything except fertility.
@@ -179,7 +208,7 @@ do
   goodExceptFertility.fertility = 1 -- below the atLeast-4 target -> "bad"
 
   local pActive, pInactive = makeAlleles(traitList, goodExceptFertility)
-  apiary(2)[1] = mockBeeStack(pActive, pInactive, true) -- side "north" = 2
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
 
   -- Working slot 5: a weak drone (nothing good).
   local weakActive, weakInactive = makeAlleles(traitList, {})
@@ -192,12 +221,12 @@ do
   world.agentInventory[6] = mockBeeStack(strongActive, strongInactive, true)
 
   local config = { workingSlots = { 5, 6 }, minCopies = 2 }
-  local site = { name = "test-site", side = 2, mode = "traitmax" }
+  local site = { name = "test-site", x = 5, z = 9, mode = "traitmax" }
 
   local status = M.runQualitySite(config, site)
   check("runQualitySite reports a load", status:match("^loaded drone") ~= nil, status)
   check("runQualitySite selected slot 6 (fertility carrier)", world.selectedSlot == 6, "selected=" .. tostring(world.selectedSlot))
-  check("runQualitySite actually swapped the drone into the apiary", apiary(2)[2] ~= nil and apiary(2)[2].individual.active.fertility == Cfg.targets.fertility.target)
+  check("runQualitySite actually swapped the drone into the apiary", apiary(DOWN)[2] ~= nil and apiary(DOWN)[2].individual.active.fertility == Cfg.targets.fertility.target)
   check("runQualitySite pulled the weak drone's slot back out (still slot 5 in inventory, untouched)", world.agentInventory[5] ~= nil)
 end
 
@@ -209,6 +238,7 @@ end
 do
   world.apiaries = {}
   world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
   world._mutationRecipes = {
     ["NewSpecies"] = {
       { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
@@ -226,15 +256,15 @@ do
   world.agentInventory[4] = mockBeeStack(meadowsActive, meadowsInactive, true)
 
   local config = { workingSlots = { 3, 4 } }
-  local site = { name = "mutation-site", side = 4, mode = "mutation", targetSpecies = "NewSpecies" }
+  local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
 
   local status = M.runMutationSite(config, site)
   check("runMutationSite reports an attempt", status:match("^attempting mutation") ~= nil, status)
-  check("runMutationSite loaded a queen", apiary(4)[1] ~= nil)
-  check("runMutationSite loaded a drone", apiary(4)[2] ~= nil)
+  check("runMutationSite loaded a queen", apiary(DOWN)[1] ~= nil)
+  check("runMutationSite loaded a drone", apiary(DOWN)[2] ~= nil)
 
-  local queenSpecies = Cfg.speciesKey(apiary(4)[1].individual.active.species)
-  local droneSpecies = Cfg.speciesKey(apiary(4)[2].individual.active.species)
+  local queenSpecies = Cfg.speciesKey(apiary(DOWN)[1].individual.active.species)
+  local droneSpecies = Cfg.speciesKey(apiary(DOWN)[2].individual.active.species)
   check("runMutationSite used the satisfiable Forest/Meadows pair",
     (queenSpecies == "Forest" and droneSpecies == "Meadows") or (queenSpecies == "Meadows" and droneSpecies == "Forest"),
     "queen=" .. tostring(queenSpecies) .. " drone=" .. tostring(droneSpecies))
@@ -247,13 +277,14 @@ end
 do
   world.apiaries = {}
   world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
   world._mutationRecipes = {
     ["NewSpecies"] = {
       { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
     },
   }
   local config = { workingSlots = { 3, 4 } }
-  local site = { name = "mutation-site", side = 4, mode = "mutation", targetSpecies = "NewSpecies" }
+  local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
 
   local status = M.runMutationSite(config, site)
   check("runMutationSite reports waiting when parents aren't held", status:match("^waiting_on_parent_species") ~= nil, status)
@@ -266,12 +297,13 @@ end
 do
   world.apiaries = {}
   world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
   local traitList = M.traitListFor("mutation")
   local activeT, inactiveT = makeAlleles(traitList, { species = { name = "NewSpecies" } })
   world.agentInventory[9] = mockBeeStack(activeT, inactiveT, true)
 
   local config = { workingSlots = { 9 } }
-  local site = { name = "mutation-site", side = 4, mode = "mutation", targetSpecies = "NewSpecies" }
+  local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
   local status = M.runMutationSite(config, site)
   check("runMutationSite detects a targetSpecies bee already in hand", status == "mutation_succeeded:switch_site_to_species_mode", status)
 end
@@ -299,14 +331,58 @@ end
 do
   world.apiaries = {}
   world.agentInventory = {}
-  apiary(2)[7] = mockBeeStack({ fertility = 2 }, { fertility = 2 }, true)
-  apiary(2)[8] = mockBeeStack({ fertility = 3 }, { fertility = 3 }, true)
+  world.dronePos = { x = 5, z = 9 }
+  apiary(DOWN)[7] = mockBeeStack({ fertility = 2 }, { fertility = 2 }, true)
+  apiary(DOWN)[8] = mockBeeStack({ fertility = 3 }, { fertility = 3 }, true)
 
   local config = { workingSlots = { 1, 2, 3 }, productSlots = { 7, 8 } }
-  local site = { name = "harvest-site", side = 2, mode = "traitmax" }
+  local site = { name = "harvest-site", x = 5, z = 9, mode = "traitmax" }
   local harvested = M.harvestSite(config, site)
   check("harvestSite pulls both waiting products", harvested == 2, "harvested=" .. tostring(harvested))
-  check("harvestSite clears the apiary's product slots", apiary(2)[7] == nil and apiary(2)[8] == nil)
+  check("harvestSite clears the apiary's product slots", apiary(DOWN)[7] == nil and apiary(DOWN)[8] == nil)
+end
+
+-- ============================================================
+-- Test: dumpToStorage flies to storagePos and drops discarded drones
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+  world.agentInventory[10] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+  world.agentInventory[11] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+
+  local config = { storagePos = { x = 0, z = 0 }, storageSlotCount = 10 }
+  local discardEntries = {
+    { drone = { id = "a", _slot = 10 } },
+    { drone = { id = "b", _slot = 11 } },
+    { drone = { id = "keep-me", _slot = 12 } }, -- should be skipped (it's the kept one)
+  }
+
+  local dropped = M.dumpToStorage(config, discardEntries, "keep-me")
+  check("dumpToStorage drops exactly the two non-kept drones", dropped == 2, "dropped=" .. tostring(dropped))
+  check("dumpToStorage flew to storagePos", world.dronePos.x == 0 and world.dronePos.z == 0)
+  check("dumpToStorage actually placed items in the storage inventory", apiary(DOWN)[1] ~= nil and apiary(DOWN)[2] ~= nil)
+end
+
+-- ============================================================
+-- Test: loadSites merges persisted (x,z) with mode/targetSpecies overrides
+-- ============================================================
+
+do
+  local saved = {
+    { name = "site1", x = 3, z = 4 },
+    { name = "site2", x = 10, z = 12 },
+  }
+  local overrides = {
+    site2 = { mode = "species", targetSpecies = "Sticky" },
+  }
+
+  local sites = M.loadSites(saved, overrides)
+  check("loadSites keeps positions", sites[1].x == 3 and sites[1].z == 4 and sites[2].x == 10 and sites[2].z == 12)
+  check("loadSites defaults unassigned sites to traitmax", sites[1].mode == "traitmax")
+  check("loadSites applies overrides", sites[2].mode == "species" and sites[2].targetSpecies == "Sticky")
 end
 
 print("")

@@ -1,15 +1,18 @@
 --[[
-  Example config for bee_keeper_manager.lua. Edit and rename/require as
-  needed -- this is a plain Lua table (not a serialized data file), so it
-  can have comments and be hand-edited directly.
---]]
+  Config for bee_keeper_manager.lua / bee_keeper_manager_run.lua. Plain Lua
+  table (not a serialized data file), so it can have comments and be
+  hand-edited directly.
 
-local sides = require("sides")
+  Site POSITIONS come from bee_keeper_setup.lua's area scan (persisted to
+  bee_keeper_sites.dat) -- you don't list them here. What you DO configure
+  here is what each discovered site should be doing (siteOverrides, keyed
+  by the "siteN" name the scan assigned) -- anything left unassigned
+  defaults to "traitmax".
+--]]
 
 return {
   -- Slot holding honey/honeydew stock for beekeeper.analyze(). Restock
-  -- this manually for now (or wire up a refill step once movement/storage
-  -- access is built).
+  -- this manually for now.
   honeySlot = 1,
 
   -- Slots used as the live candidate-bee pool (the agent's own cargo).
@@ -26,10 +29,41 @@ return {
   minCopies = 2,
 
   -- Optional: what to do with a drone the algorithm doesn't want to keep.
-  -- Left nil for now -- discarded drones are just left in place. Wire this
-  -- up to a sampler/furnace/junk routine later if you want them cleared
-  -- automatically.
+  -- If left nil AND storagePos is set (see below), discarded drones are
+  -- automatically flown to storage and dropped (M.dumpToStorage). Set this
+  -- to a function(bee) to route them elsewhere instead (sampler/furnace).
   onDiscard = nil,
+
+  -- How many slots to try in the storage container before giving up on a
+  -- discard (54 = a double chest).
+  storageSlotCount = 54,
+
+  -- Block names the area scan (bee_keeper_setup.lua) treats as "this is an
+  -- apiary" / "this is the storage chest", matched against
+  -- geolyzer.analyze(sides.down).name. apiaryBlockNames are still
+  -- UNCONFIRMED BEST GUESSES -- use bee_keeper_setup.probeBlockBelow()
+  -- while hovering over a known apiary to get the real name and fix these
+  -- before running the scan for real. storageBlockNames is just a plain
+  -- chest (MVP -- confirmed vanilla block names, no guessing needed).
+  apiaryBlockNames = {
+    "forestry:apiary",
+    "forestry:alveary",
+  },
+  storageBlockNames = {
+    "minecraft:chest",
+    "minecraft:trapped_chest",
+  },
+
+  -- Whether bee_keeper_setup.lua flies the 4 corners (with a light flash)
+  -- before scanning, in addition to the printed ASCII preview. Costs a
+  -- little travel time up front.
+  showBorderPreview = true,
+
+  -- Charger position (dead-reckoned x,z, same origin as Nav.setHome) and
+  -- whether to auto-return there when low on charge each cycle.
+  needCharge = true,
+  chargeThreshold = 0.2,
+  chargerPos = { x = 0, z = 0 },
 
   -- Optional static mutation fallback, same shape bee_housing.getBeeParents
   -- would return, keyed by target species name. Only consulted if the live
@@ -41,12 +75,20 @@ return {
     -- },
   },
 
-  -- Each apiary the agent manages. `side` is relative to wherever the
-  -- agent ends up sitting for that site (see Nav.gotoSite -- currently a
-  -- stub assuming the agent is already in position).
-  sites = {
-    { name = "traitmax-1", side = sides.north, mode = "traitmax" },
-    { name = "sticky-purify", side = sides.south, mode = "species", targetSpecies = "Sticky" },
-    { name = "new-species-attempt", side = sides.east, mode = "mutation", targetSpecies = "SomeNewSpecies" },
+  -- What each discovered site (by the name the scan assigned -- "site1",
+  -- "site2", ...) should be doing. Anything not listed here defaults to
+  -- traitmax. Run bee_keeper_setup once first to find out what your sites
+  -- are actually named, then fill this in.
+  siteOverrides = {
+    -- ["site1"] = { mode = "species", targetSpecies = "Sticky" },
+    -- ["site2"] = { mode = "mutation", targetSpecies = "SomeNewSpecies" },
   },
+
+  -- storagePos gets filled in by bee_keeper_setup.lua's scan automatically
+  -- (see bee_keeper_manager_run.lua) -- leave nil here.
+  storagePos = nil,
+
+  -- sites gets filled in by bee_keeper_manager_run.lua from the persisted
+  -- scan + siteOverrides above (see M.loadSites) -- leave nil here.
+  sites = nil,
 }
