@@ -193,8 +193,12 @@ end
 -- stack.individual shape bee_keeper_manager.lua's readIndividual expects.
 -- Skips "_uid" -- toStack (below) caches a per-individual id directly on
 -- the raw genotype table, which isn't a trait and doesn't have
--- .active/.inactive fields.
-local function toIndividual(rawGenotype)
+-- .active/.inactive fields. isAnalyzed defaults to true (demo starting
+-- stock is pre-identified) -- freshly bred offspring explicitly pass
+-- false (see getBeeProgress's makeOffspring), matching real Forestry:
+-- you have to identify a newly bred bee with honey before its traits
+-- are known.
+local function toIndividual(rawGenotype, isAnalyzed)
   local active, inactive = {}, {}
   for trait, alleles in pairs(rawGenotype) do
     if trait ~= "_uid" then
@@ -202,7 +206,7 @@ local function toIndividual(rawGenotype)
       inactive[trait] = alleles.inactive
     end
   end
-  return { active = active, inactive = inactive, isAnalyzed = true }
+  return { active = active, inactive = inactive, isAnalyzed = isAnalyzed ~= false }
 end
 -- Verbose-mode debugging aid: a stable, unique ID per actual individual
 -- bee (not per stack-merge, not re-assigned every time the SAME bee is
@@ -222,13 +226,21 @@ end
 -- kind ("princess"/"drone"/nil) picks a real Forestry-style item name --
 -- bee_keeper_manager.lua's findPrincessCandidate matches on item name
 -- (case-insensitive "princess"/"queen"), so a generic name would make
--- this sim unable to ever exercise that code path at all.
-local function toStack(rawGenotype, kind)
+-- this sim unable to ever exercise that code path at all. isAnalyzed
+-- (default true) only matters at CREATION time -- the resulting stack
+-- is what actually gets stored (in cargo, or an apiary's products), and
+-- read back as-is thereafter, so there's no need to cache analyzed
+-- status on the raw genotype the way _uid is cached. The one place
+-- toStack re-derives from persistent raw data on every read (an
+-- apiary's princessRaw/droneRaw peek) only ever holds bees that were
+-- ALREADY analyzed before being swapped in, so defaulting true there is
+-- always correct.
+local function toStack(rawGenotype, kind, isAnalyzed)
   if rawGenotype._uid == nil then rawGenotype._uid = nextUid() end
   local name = "forestry:bee"
   if kind == "princess" then name = "Forestry:beePrincessGE"
   elseif kind == "drone" then name = "Forestry:beeDroneGE" end
-  return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype), _uid = rawGenotype._uid }
+  return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype, isAnalyzed), _uid = rawGenotype._uid }
 end
 
 -- Inverse of toIndividual -- extracts a raw genotype (active/inactive per
@@ -417,6 +429,13 @@ function M.newWorld(config, sites)
   end
 
   world.drone.inventory[config.honeySlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
+  -- Backup honey in storage too -- analyze() now actually consumes it
+  -- (see component.beekeeper.analyze below), so cargo's stock is finite
+  -- and will genuinely run dry over a long run. Without a backup
+  -- somewhere else, M.restockHoney's fallback path would have nothing to
+  -- find and analysis would just permanently stop working.
+  world.storage[nextStorageSlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
+  nextStorageSlot = nextStorageSlot + 1
 
   return world
 end
@@ -718,9 +737,12 @@ function M.install(config, sites, opts)
             -- harvesting at all.
           end
 
-          addProduct(toStack(newPrincess, "princess"))
+          -- Freshly bred bees start UNANALYZED -- real Forestry doesn't
+          -- reveal a newly bred individual's traits until you identify
+          -- it with honey (see the analyze() implementation below).
+          addProduct(toStack(newPrincess, "princess", false))
           for _ = 1, 2 do
-            addProduct(toStack(makeOffspring(), "drone"))
+            addProduct(toStack(makeOffspring(), "drone", false))
           end
 
           a.princessRaw = nil
@@ -761,7 +783,25 @@ function M.install(config, sites, opts)
       a.workTicks = 0
       return true
     end,
-    analyze = function() return true end, -- everything in this sim is pre-analyzed
+    -- Consumes 1 honey/honeydew from honeySlot (real Forestry: analyzing
+    -- identifies a bee by consuming a unit of honey) and marks the
+    -- CURRENTLY SELECTED cargo slot's bee as analyzed. Fails if honeySlot
+    -- is empty or isn't actually honey -- matches real hardware, and is
+    -- what makes M.analyzeWorkingSlots/M.restockHoney's fallback path
+    -- worth exercising at all instead of honey being a no-op fiction.
+    analyze = function(honeySlot)
+      local honey = world.drone.inventory[honeySlot]
+      if not honey or not honey.name or not honey.name:lower():find("honey") then
+        return false
+      end
+      honey.size = (honey.size or 1) - 1
+      if honey.size <= 0 then world.drone.inventory[honeySlot] = nil end
+
+      local selected = world.drone._selected
+      local stack = world.drone.inventory[selected]
+      if stack and stack.individual then stack.individual.isAnalyzed = true end
+      return true
+    end,
   }
 
   component.bee_housing = {
@@ -828,13 +868,53 @@ end
 -- Verbose debugging dump
 -- ============================================================
 
-local function formatStack(stack)
+-- Explicit abbreviations -- trait:sub(1,4) collides ("flowering" and
+-- "flowerProvider" would both truncate to "flow").
+local TRAIT_ABBR = {
+  fertility = "fert",
+  lifespan = "life",
+  flowering = "flwg",
+  flowerProvider = "flpr",
+  temperatureTolerance = "temp",
+  humidityTolerance = "humid",
+  nocturnal = "noct",
+  tolerantFlyer = "tfly",
+  caveDwelling = "cave",
+}
+
+-- Short trait-state summary (GG/Gb/bG/bb per active/meaningful trait --
+-- excludes "any"-kind traits like effect/territory/speed, which don't
+-- have a meaningful good/bad state to show) for an ANALYZED bee. Returns
+-- nil for an unanalyzed one -- formatStack shows "(unidentified)"
+-- instead, matching real Forestry: you can't see a bee's traits until
+-- you identify it with honey.
+local function traitSummary(individual)
+  if not individual.isAnalyzed then return nil end
+  local traits = Cfg.activeTraits()
+  local genotype = Cfg.normalizeGenotype(traits, individual.active, individual.inactive, nil)
+  local parts = {}
+  for _, trait in ipairs(traits) do
+    table.insert(parts, (TRAIT_ABBR[trait] or trait) .. "=" .. BB.traitState(genotype, trait))
+  end
+  return table.concat(parts, ",")
+end
+
+-- showTraits: pass true to append the concise trait-state summary (or
+-- "(unidentified)" if the bee hasn't been analyzed yet) -- per your
+-- call, this is shown for cargo/storage always, and for an apiary's
+-- princess/drone specifically, but NOT its output slots.
+local function formatStack(stack, showTraits)
   if not stack then return "empty" end
   if stack.individual then
     local species = stack.individual.active and stack.individual.active.species
     local speciesName = species and Cfg.speciesKey(species) or "?"
     local uidStr = stack._uid and (" [uid=" .. stack._uid .. "]") or ""
-    return string.format("%s x%s (%s)%s", stack.name, tostring(stack.size or 1), speciesName, uidStr)
+    local base = string.format("%s x%s (%s)%s", stack.name, tostring(stack.size or 1), speciesName, uidStr)
+    if showTraits then
+      local summary = traitSummary(stack.individual)
+      base = base .. " {" .. (summary or "unidentified") .. "}"
+    end
+    return base
   end
   return string.format("%s x%s", stack.name, tostring(stack.size or 1))
 end
@@ -866,22 +946,22 @@ function M.dumpWorld()
   local cargoSlots = sortedKeys(world.drone.inventory)
   if #cargoSlots == 0 then print("    (empty)") end
   for _, slot in ipairs(cargoSlots) do
-    print(string.format("    slot %d: %s", slot, formatStack(world.drone.inventory[slot])))
+    print(string.format("    slot %d: %s", slot, formatStack(world.drone.inventory[slot], true)))
   end
 
   print("  --- storage ---")
   local storageSlots = sortedKeys(world.storage)
   if #storageSlots == 0 then print("    (empty)") end
   for _, slot in ipairs(storageSlots) do
-    print(string.format("    slot %d: %s", slot, formatStack(world.storage[slot])))
+    print(string.format("    slot %d: %s", slot, formatStack(world.storage[slot], true)))
   end
 
   print("  --- apiaries ---")
   for _, key in ipairs(sortedKeys(world.apiaries)) do
     local a = world.apiaries[key]
     print(string.format("    apiary @ (%s) -- work %d/%d:", key, a.workTicks, a.workNeeded))
-    print("      slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess")) or "empty"))
-    print("      slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone")) or "empty"))
+    print("      slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess"), true) or "empty"))
+    print("      slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone"), true) or "empty"))
     local productSlots = sortedKeys(a.products or {})
     if #productSlots == 0 then
       print("      outputs (6-12): (empty)")
