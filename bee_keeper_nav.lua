@@ -29,6 +29,7 @@
 --]]
 
 local M = {}
+local Status = require("bee_keeper_status")
 
 local function drone() return require("component").drone end
 local function computer() return require("computer") end
@@ -98,6 +99,7 @@ function M.gotoXZ(targetX, targetZ)
     return true
   end
 
+  Status.setStep(string.format("Flying to (%d,%d)", targetX, targetZ))
   drone().move(dx, 0, dz)
 
   local lastOffset = drone().getOffset()
@@ -121,7 +123,9 @@ function M.gotoXZ(targetX, targetZ)
     lastOffset = offset
 
     if stuckFor > M.stuckTimeout then
-      return false, "stuck_at_offset_" .. string.format("%.1f", offset)
+      local reason = "stuck_at_offset_" .. string.format("%.1f", offset)
+      Status.setStep(string.format("STUCK flying to (%d,%d): %s", targetX, targetZ, reason))
+      return false, reason
     end
   end
 end
@@ -187,6 +191,7 @@ end
 function M.chargeAtHome(chargerXZ)
   local target = chargerXZ or homePos
   M.gotoXZ(target.x, target.z)
+  Status.setStep("Charging")
   while not M.isFullyCharged() do
     os.sleep(1)
   end

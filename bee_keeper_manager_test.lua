@@ -385,6 +385,79 @@ do
   check("loadSites applies overrides", sites[2].mode == "species" and sites[2].targetSpecies == "Sticky")
 end
 
+-- ============================================================
+-- Test: purityOf -- fraction of loci fixed to GG (progress to purebred)
+-- ============================================================
+
+do
+  local traits = { "fertility", "speed", "lifespan", "flowering" }
+  local function genotype(states)
+    -- states: array of "GG" | "Gb" | "bb", one per trait above
+    local g = {}
+    for i, trait in ipairs(traits) do
+      local s = states[i]
+      g[trait] = {
+        active = (s == "GG" or s == "Gb") and "good" or "bad",
+        inactive = (s == "GG") and "good" or "bad",
+      }
+    end
+    return g
+  end
+
+  check("purityOf: all GG is 1.0", M.purityOf(traits, genotype({ "GG", "GG", "GG", "GG" })) == 1.0)
+  check("purityOf: none GG is 0.0", M.purityOf(traits, genotype({ "bb", "bb", "bb", "bb" })) == 0.0)
+  check("purityOf: half GG is 0.5", M.purityOf(traits, genotype({ "GG", "GG", "bb", "bb" })) == 0.5)
+  check("purityOf: heterozygous does NOT count as fixed",
+    M.purityOf(traits, genotype({ "Gb", "Gb", "Gb", "Gb" })) == 0.0)
+  check("purityOf: empty trait list doesn't divide by zero", M.purityOf({}, {}) == 0)
+end
+
+-- ============================================================
+-- Test: runQualitySite caches purity onto the site for the dashboard
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 1, z = 1 }
+
+  local traitList = M.traitListFor("traitmax")
+  local allGood = {}
+  for _, t in ipairs(traitList) do allGood[t] = Cfg.targets[t].target end
+  local pActive, pInactive = makeAlleles(traitList, allGood)
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+  world.agentInventory[5] = mockBeeStack(pActive, pInactive, true)
+
+  local site = { name = "purity-site", x = 1, z = 1, mode = "traitmax" }
+  check("site has no progress before it's ever visited", site.progress == nil)
+
+  M.runQualitySite({ workingSlots = { 5 }, minCopies = 2 }, site)
+  check("runQualitySite records progress on the site", site.progress == 1.0,
+    "progress=" .. tostring(site.progress))
+end
+
+-- ============================================================
+-- Test: listCargo lists occupied working slots only, with raw stacks
+-- (not just .individual -- the UI panel needs to show non-bee items too)
+-- ============================================================
+
+do
+  world.agentInventory = {}
+  world.agentInventory[2] = mockBeeStack({ fertility = 4 }, { fertility = 4 }, true)
+  world.agentInventory[5] = { name = "forestry:honey_drop", size = 64 } -- non-bee item
+  -- slot 3 deliberately left empty
+
+  local config = { workingSlots = { 2, 3, 5, 9 } }
+  local cargo = M.listCargo(config)
+  check("listCargo returns exactly the occupied slots", #cargo == 2, "count=" .. #cargo)
+
+  local bySlot = {}
+  for _, entry in ipairs(cargo) do bySlot[entry.slot] = entry.stack end
+  check("listCargo includes the bee stack", bySlot[2] ~= nil and bySlot[2].individual ~= nil)
+  check("listCargo includes non-bee items too", bySlot[5] ~= nil and bySlot[5].name == "forestry:honey_drop")
+  check("listCargo skips empty slots", bySlot[3] == nil and bySlot[9] == nil)
+end
+
 print("")
 if failures == 0 then
   print("ALL TESTS PASSED")

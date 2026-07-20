@@ -78,6 +78,7 @@
 local BB = require("bee_breeding")
 local Cfg = require("bee_trait_config")
 local Nav = require("bee_keeper_nav")
+local Status = require("bee_keeper_status")
 
 local M = {}
 M.Nav = Nav
@@ -131,6 +132,33 @@ end
 function M.readSideSlot(side, slot)
   local stack = invCtrl().getStackInSlot(side, slot)
   return readIndividual(stack)
+end
+
+-- Lists the agent's own occupied cargo slots as { {slot=N, stack=rawStack}, ... }
+-- -- for bee_keeper_ui.lua's cargo panel. Unlike readOwnSlot, returns the
+-- RAW stack (not just .individual), since the UI wants to show non-bee
+-- items (honey) too, not just analyzed bees. Always safe to call: reading
+-- your own inventory has no position constraint, unlike an external one
+-- (see M.listStorage in bee_keeper_local_sim_run.lua's real-hardware note).
+function M.listCargo(config)
+  local list = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    if stack then table.insert(list, { slot = slot, stack = stack }) end
+  end
+  return list
+end
+
+-- Fraction (0..1) of tracked loci already fixed to GG (homozygous good) --
+-- i.e. how close this bee is to fully purebred-perfect. 1.0 means every
+-- tracked trait is locked in and BB.isPurebred would return true.
+function M.purityOf(traitList, genotype)
+  if #traitList == 0 then return 0 end
+  local fixed = 0
+  for _, trait in ipairs(traitList) do
+    if BB.traitState(genotype, trait) == "GG" then fixed = fixed + 1 end
+  end
+  return fixed / #traitList
 end
 
 -- Build a bee_breeding.lua-compatible {id, genotype} from something an
@@ -191,6 +219,7 @@ end
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
 -- Returns a short status string for logging.
 function M.runQualitySite(config, site)
+  Status.setStep("Heading to " .. (site.name or "?") .. " (" .. site.mode .. ")")
   local ok, reason = gotoSite(site)
   if not ok then return "nav_failed:" .. tostring(reason) end
 
@@ -207,7 +236,15 @@ function M.runQualitySite(config, site)
     return "no_princess_at_site"
   end
 
+  Status.setStep("Evaluating drones for " .. (site.name or "?"))
   local princessBee = toBreedingBee("princess", princessIndividual, traitList, targetSpecies)
+
+  -- Cache how close this apiary's princess is to purebred-perfect, for
+  -- the dashboard. Stored on the site rather than passed around because
+  -- an apiary's contents are a side-relative read -- only knowable while
+  -- the drone is actually standing at it -- so this is a last-known
+  -- value, refreshed each visit, not live telemetry.
+  site.progress = M.purityOf(traitList, princessBee.genotype)
   local dronePool = gatherCandidateDrones(config, traitList, targetSpecies)
   if #dronePool == 0 then
     return "no_candidate_drones_in_working_slots"
@@ -235,8 +272,15 @@ function M.runQualitySite(config, site)
   end
   if discardCount > 0 and not config.onDiscard and config.storagePos then
     M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
+    -- dumpToStorage flew away to drop off discards -- come back before
+    -- finishing the swap below, or it lands on the storage chest instead
+    -- of the apiary (caught by the local simulator: swapDrone would fail
+    -- there since there's no apiary at the storage position).
+    local backOk, backReason = gotoSite(site)
+    if not backOk then return "nav_failed_returning_from_storage:" .. tostring(backReason) end
   end
 
+  Status.setStep("Loading drone into " .. (site.name or "?"))
   agent().select(plan.breedWith._slot)
   local swapped = beekeeper().swapDrone(down)
   if not swapped then return "swap_drone_failed" end
@@ -336,6 +380,7 @@ end
 
 -- Runs one decision+action cycle for a "mutation" site.
 function M.runMutationSite(config, site)
+  Status.setStep("Heading to " .. (site.name or "?") .. " (mutation)")
   local ok, reason = gotoSite(site)
   if not ok then return "nav_failed:" .. tostring(reason) end
 
@@ -344,10 +389,20 @@ function M.runMutationSite(config, site)
     return string.format("attempting (%.0f%%)", beekeeper().getBeeProgress(down))
   end
 
+  -- Same last-known purity cache as runQualitySite (see the note there).
+  -- A mutation site is often empty between attempts, in which case there
+  -- is simply nothing to measure yet.
+  local mutationTraits = M.traitListFor(site.mode)
+  local sittingPrincess = M.readSideSlot(down, 1)
+  if sittingPrincess then
+    local sittingBee = toBreedingBee("princess", sittingPrincess, mutationTraits, site.targetSpecies)
+    site.progress = M.purityOf(mutationTraits, sittingBee.genotype)
+  end
+
   -- Once a mutation succeeds, some harvested offspring will be
   -- targetSpecies -- check the working slots for one before planning
   -- another attempt, so a lucky success isn't immediately overwritten.
-  local traitList = M.traitListFor("mutation")
+  local traitList = mutationTraits
   for _, slot in ipairs(config.workingSlots) do
     local individual = M.readOwnSlot(slot)
     if individual and Cfg.speciesKey(individual.active.species) == site.targetSpecies then
@@ -360,6 +415,8 @@ function M.runMutationSite(config, site)
     return "waiting_on_parent_species:" .. (missingReport or "no_known_recipe")
   end
 
+  Status.setStep(string.format("Attempting mutation at %s: %s x %s",
+    site.name or "?", plan.princessSpecies, plan.droneSpecies))
   agent().select(plan.princessSlot)
   if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
   agent().select(plan.droneSlot)
@@ -379,6 +436,7 @@ end
 -- inventory_controller.suckFromSlot instead of a transposer).
 function M.harvestSite(config, site, productSlots)
   productSlots = productSlots or config.productSlots or { 7, 8, 9, 10, 11, 12, 13, 14, 15 }
+  Status.setStep("Harvesting " .. (site.name or "?"))
   local ok = gotoSite(site)
   if not ok then return 0 end
 
@@ -404,6 +462,7 @@ end
 
 function M.dumpToStorage(config, discardEntries, keepId)
   if not config.storagePos then return 0 end
+  Status.setStep("Flying discards to storage")
   local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
   if not ok then return 0 end
 
@@ -434,6 +493,7 @@ function M.analyzeWorkingSlots(config)
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
     if stack and stack.individual and not stack.individual.isAnalyzed then
+      Status.setStep("Analyzing bee in slot " .. slot)
       agent().select(slot)
       local ok = beekeeper().analyze(config.honeySlot)
       if ok then analyzed = analyzed + 1 end

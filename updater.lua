@@ -89,6 +89,8 @@ function Updater:downloadFiles()
     "bee_trait_config.lua",
     "bee_keeper_nav.lua",
     "bee_keeper_setup.lua",
+    "bee_keeper_status.lua",
+    "bee_keeper_ui.lua",
     "bee_keeper_manager.lua",
     "bee_keeper_manager_run.lua",
     "updater.lua",
