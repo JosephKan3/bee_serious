@@ -201,7 +201,7 @@ local function toStack(rawGenotype, kind)
   local name = "forestry:bee"
   if kind == "princess" then name = "Forestry:beePrincessGE"
   elseif kind == "drone" then name = "Forestry:beeDroneGE" end
-  return { name = name, individual = toIndividual(rawGenotype) }
+  return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype) }
 end
 
 -- Inverse of toIndividual -- extracts a raw genotype (active/inactive per
@@ -213,6 +213,85 @@ local function rawFromIndividual(individual)
     g[trait] = { active = activeValue, inactive = individual.inactive[trait] }
   end
   return g
+end
+
+-- Real per-slot stack cap for anything simulated here (bees, combs,
+-- honey alike) -- per your spec: same type stacks to 64, otherwise
+-- occupies a separate slot.
+local MAX_STACK = 64
+
+-- Whether two raw item stacks would actually merge in a real inventory
+-- slot: same item name, and if it's an analyzed bee, an EXACT genotype
+-- match (mirrors bee_keeper_manager.lua's own stacksMatch -- duplicated
+-- here since that's a private local there, not exported, and this sim
+-- needs the identical rule to behave the same way real hardware does).
+local function stacksMatch(a, b)
+  if not a or not b or a.name ~= b.name then return false end
+  local ai, bi = a.individual, b.individual
+  if not ai and not bi then return true end
+  if not (ai and bi) then return false end
+  if ai.isAnalyzed ~= bi.isAnalyzed then return false end
+
+  local function valuesEqual(x, y)
+    if type(x) == "table" and type(y) == "table" then
+      return x.name == y.name and x.uid == y.uid
+    end
+    return x == y
+  end
+
+  for trait, v in pairs(ai.active or {}) do
+    if not valuesEqual(v, bi.active and bi.active[trait]) then return false end
+  end
+  for trait, v in pairs(ai.inactive or {}) do
+    if not valuesEqual(v, bi.inactive and bi.inactive[trait]) then return false end
+  end
+  for trait in pairs(bi.active or {}) do
+    if ai.active == nil or ai.active[trait] == nil then return false end
+  end
+  return true
+end
+
+local function isPrincessOrQueenStack(stack)
+  if not stack or not stack.name then return false end
+  local lower = stack.name:lower()
+  return lower:find("princess") ~= nil or lower:find("queen") ~= nil
+end
+
+local function isDroneStack(stack)
+  if not stack or not stack.name then return false end
+  return stack.name:lower():find("drone") ~= nil
+end
+
+-- Shallow-copies a stack's fields into a brand-new table -- used whenever
+-- a NEW stack needs to exist independently of its source (so mutating
+-- the copy's .size later doesn't also change the original).
+local function cloneStack(stack, size)
+  local copy = {}
+  for k, v in pairs(stack) do copy[k] = v end
+  copy.size = size or stack.size or 1
+  copy.maxSize = MAX_STACK
+  return copy
+end
+
+-- Deposits `count` units of `incoming` into container[slot]: merges into
+-- a matching, not-yet-full existing stack there, or creates a fresh one
+-- if the slot's empty. Returns how many actually fit (0 if the slot
+-- holds something incompatible, or is already full). Doesn't touch the
+-- source at all -- callers are responsible for removing what actually
+-- moved.
+local function depositInto(container, slot, incoming, count)
+  count = count or (incoming.size or 1)
+  local existing = container[slot]
+  if existing == nil then
+    local moved = math.min(count, MAX_STACK)
+    container[slot] = cloneStack(incoming, moved)
+    return moved
+  end
+  if not stacksMatch(existing, incoming) then return 0 end
+  local room = MAX_STACK - (existing.size or 1)
+  local moved = math.min(count, room)
+  if moved > 0 then existing.size = (existing.size or 1) + moved end
+  return moved
 end
 
 M.crossRaw = crossRaw
@@ -273,13 +352,13 @@ function M.newWorld(config, sites)
   -- silently clobber the honey slot or land somewhere outside the pool
   -- bee_keeper_manager.lua actually looks at.
   local nextWorkingSlotIndex = 1
-  local function put(rawGenotype)
+  local function put(rawGenotype, kind)
     while config.workingSlots[nextWorkingSlotIndex] == config.honeySlot do
       nextWorkingSlotIndex = nextWorkingSlotIndex + 1
     end
     local slot = config.workingSlots[nextWorkingSlotIndex]
     nextWorkingSlotIndex = nextWorkingSlotIndex + 1
-    world.drone.inventory[slot] = toStack(rawGenotype, "drone")
+    world.drone.inventory[slot] = toStack(rawGenotype, kind or "drone")
   end
 
   put(makeGoodRaw(traitList, "Forest"))
@@ -288,14 +367,19 @@ function M.newWorld(config, sites)
 
   for _, s in ipairs(sites) do
     if s.mode == "mutation" then
-      put(makeStartingRaw(traitList, "Forest"))
-      put(makeStartingRaw(traitList, "Meadows"))
+      -- A real mutation pair needs ONE princess/queen + ONE drone
+      -- (Forestry doesn't care which named species ends up on which
+      -- side) -- seeding two drones here would make every mutation
+      -- attempt fail with swap_queen_failed, since nothing in cargo
+      -- would actually be a princess.
+      put(makeStartingRaw(traitList, "Forest"), "princess")
+      put(makeStartingRaw(traitList, "Meadows"), "drone")
     elseif s.mode == "species" and s.targetSpecies then
       put(makeGoodRaw(traitList, s.targetSpecies))
     end
   end
 
-  world.drone.inventory[config.honeySlot] = { name = "forestry:honey_drop", size = 64 }
+  world.drone.inventory[config.honeySlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
 
   return world
 end
@@ -304,13 +388,34 @@ end
 -- Fake hardware, backed by the world above
 -- ============================================================
 
+-- opts.cargoSize / opts.storageSize: per your spec, cargo defaults to 16
+-- and storage to 27, but both need to work with ANY configured size --
+-- trash is always exactly 1 slot, and an apiary is always exactly 12
+-- (1 princess + 1 drone + 3 frames, unused/unmodeled + 7 output), none
+-- of which are configurable since those are fixed real-world facts, not
+-- something a config file changes.
 function M.install(config, sites, opts)
   opts = opts or {}
   local world = M.newWorld(config, sites)
+  world.cargoSize = opts.cargoSize or 16
+  world.storageSize = opts.storageSize or 27
 
   local function apiaryAt(x, z) return world.apiaries[x .. ":" .. z] end
-  local function atStorage()
-    return config.storagePos and world.drone.x == config.storagePos.x and world.drone.z == config.storagePos.z
+  local function atPos(px, pz) return px ~= nil and world.drone.x == px and world.drone.z == pz end
+  local function atStorage() return config.storagePos and atPos(config.storagePos.x, config.storagePos.z) end
+  local function atTrash() return config.trashPos and atPos(config.trashPos.x, config.trashPos.z) end
+
+  -- Apiary slot layout (always 12 total): 1=princess, 2=drone (each ONLY
+  -- ever holding their own type -- see swapQueen/swapDrone below), 3-5=
+  -- frames (not modeled -- always empty), 6-12=output (7 slots, general
+  -- product: combs, drone offspring, the replacement princess, all
+  -- stacking to 64 by exact match like anything else here).
+  local APIARY_SIZE = 12
+  local FRAME_SLOTS = { 3, 4, 5 }
+  local FIRST_OUTPUT_SLOT = 6
+  local function isFrameSlot(slot)
+    for _, s in ipairs(FRAME_SLOTS) do if s == slot then return true end end
+    return false
   end
 
   local sidesFake = { north = 2, south = 3, east = 4, west = 5, up = 0, down = 1 }
@@ -381,61 +486,105 @@ function M.install(config, sites, opts)
     end,
     up = function() return true end,
     down = function() return true end,
+    -- Own-inventory size, NOT inventory_controller.getInventorySize()
+    -- (that one is for EXTERNAL inventories and requires a side --
+    -- confirmed on real hardware; see bee_keeper_manager.lua's
+    -- findHoneySlot/resolveWorkingSlots header notes).
+    inventorySize = function() return world.cargoSize end,
   }
 
   component.inventory_controller = {
-    -- 15 covers the widest range this sim's apiaries/storage ever use
-    -- (config.productSlots, config.storageSlotCount) -- real hardware
-    -- reports its own real size per-inventory; this just needs to be
-    -- "big enough" so M.harvestSite's size-guard never filters out a
-    -- product slot the sim actually populates.
-    getInventorySize = function(side) return side == DOWN and 15 or nil end,
-    getStackInInternalSlot = function(slot) return world.drone.inventory[slot] end,
+    -- EXTERNAL inventory size, side-relative -- always requires a side
+    -- (own inventory size is robotLib.inventorySize() instead, see
+    -- above). Trash is fixed at 1 slot, storage/apiary report their real
+    -- configured/fixed sizes -- matches real hardware validating slot
+    -- numbers against the actual target inventory (see M.harvestSite's
+    -- header notes on the "invalid slot" crash this caught before).
+    getInventorySize = function(side)
+      if side ~= DOWN then return nil end
+      if atTrash() then return 1 end
+      if atStorage() then return world.storageSize end
+      if apiaryAt(world.drone.x, world.drone.z) then return APIARY_SIZE end
+      return nil
+    end,
+    getStackInInternalSlot = function(slot)
+      if slot < 1 or slot > world.cargoSize then return nil end
+      return world.drone.inventory[slot]
+    end,
     getStackInSlot = function(side, slot)
       if side ~= DOWN then return nil end
-      if atStorage() then return world.storage[slot] end
+      if atTrash() then return nil end -- auto-deleted, nothing to see from outside
+      if atStorage() then
+        if slot < 1 or slot > world.storageSize then return nil end
+        return world.storage[slot]
+      end
       local a = apiaryAt(world.drone.x, world.drone.z)
       if not a then return nil end
+      if slot < 1 or slot > APIARY_SIZE then return nil end
       if slot == 1 then return a.princessRaw and toStack(a.princessRaw, "princess") or nil end
       if slot == 2 then return a.droneRaw and toStack(a.droneRaw, "drone") or nil end
+      if isFrameSlot(slot) then return nil end -- frames, not modeled
       if a.products and a.products[slot] then return a.products[slot] end
       return nil
     end,
-    -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot above --
+    -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot below --
     -- not an auto-picked empty slot (matches real hardware; see
-    -- bee_keeper_manager.lua's M.harvestSite header notes). If the
-    -- destination is already occupied, this models a real inventory's
-    -- merge (increments size) rather than refusing -- production code
-    -- only ever selects an occupied slot via findStackingSlot, which
-    -- already verified it's a genuine match.
-    suckFromSlot = function(side, slot)
+    -- bee_keeper_manager.lua's M.harvestSite header notes). Real
+    -- stacking: merges into a matching, not-yet-full destination stack
+    -- (capped at 64), creates a fresh one if empty, or fails outright if
+    -- the destination holds something incompatible -- exactly like a
+    -- real inventory slot, not a blind "+1".
+    suckFromSlot = function(side, slot, count)
       if side ~= DOWN then return 0 end
+      if atTrash() or atStorage() then return 0 end -- nothing to suck FROM there in this flow
       local a = apiaryAt(world.drone.x, world.drone.z)
+      if not a or slot < 1 or slot > APIARY_SIZE or isFrameSlot(slot) then return 0 end
+      if not a.products or not a.products[slot] then return 0 end
+
+      local source = a.products[slot]
       local selected = world.drone._selected
-      if a and a.products and a.products[slot] then
-        local existing = world.drone.inventory[selected]
-        if existing then
-          existing.size = (existing.size or 1) + 1
-        else
-          world.drone.inventory[selected] = a.products[slot]
-        end
-        a.products[slot] = nil
-        return 1
+      local moved = depositInto(world.drone.inventory, selected, source, count or 1)
+      if moved > 0 then
+        source.size = (source.size or 1) - moved
+        if source.size <= 0 then a.products[slot] = nil end
       end
-      return 0
+      return moved
     end,
+    -- Deposits the ENTIRE currently selected stack -- storage/trash
+    -- discards always move the whole stack at once (there's no reason to
+    -- split a discard the way ensureSingleItemSlot splits an apiary
+    -- LOAD). Trash auto-deletes on contact: the item just vanishes,
+    -- nothing is ever retained or readable back out.
     dropIntoSlot = function(side, slot)
-      if side ~= DOWN or not atStorage() then return false end
+      if side ~= DOWN then return false end
       local selected = world.drone._selected
       local stack = world.drone.inventory[selected]
       if not stack then return false end
-      local existing = world.storage[slot]
-      if existing then
-        existing.size = (existing.size or 1) + 1
-      else
-        world.storage[slot] = stack
+
+      if atTrash() then
+        if slot ~= 1 then return false end
+        world.drone.inventory[selected] = nil
+        return true
       end
-      world.drone.inventory[selected] = nil
+
+      if atStorage() then
+        if slot < 1 or slot > world.storageSize then return false end
+        local moved = depositInto(world.storage, slot, stack, stack.size or 1)
+        if moved <= 0 then return false end
+        stack.size = (stack.size or 1) - moved
+        if stack.size <= 0 then world.drone.inventory[selected] = nil end
+        return true
+      end
+
+      local a = apiaryAt(world.drone.x, world.drone.z)
+      if not a or slot < 1 or slot > APIARY_SIZE or isFrameSlot(slot) or slot == 1 or slot == 2 then
+        return false -- princess/drone slots are only ever set via swapQueen/swapDrone, not a raw drop
+      end
+      a.products = a.products or {}
+      local moved = depositInto(a.products, slot, stack, stack.size or 1)
+      if moved <= 0 then return false end
+      stack.size = (stack.size or 1) - moved
+      if stack.size <= 0 then world.drone.inventory[selected] = nil end
       return true
     end,
   }
@@ -492,12 +641,28 @@ function M.install(config, sites, opts)
           -- so they all descend from the same parents.
           local newPrincess = makeOffspring()
 
+          -- Output area is slots 6-12 (7 slots) -- 1-2 are princess/drone,
+          -- 3-5 are frames. Tries to merge into an existing matching
+          -- output stack first (real stacking, capped at 64), same as
+          -- anything else in this sim -- two mating cycles producing the
+          -- same drone genotype back-to-back should stack together, not
+          -- spread across separate output slots one at a time.
           a.products = a.products or {}
-          local nextProductSlot = 3
-          local function addProduct(stack)
-            while a.products[nextProductSlot] do nextProductSlot = nextProductSlot + 1 end
-            a.products[nextProductSlot] = stack
-            nextProductSlot = nextProductSlot + 1
+          local function addProduct(newStack)
+            for outSlot = FIRST_OUTPUT_SLOT, APIARY_SIZE do
+              local existing = a.products[outSlot]
+              if existing == nil then
+                a.products[outSlot] = cloneStack(newStack, newStack.size or 1)
+                return
+              elseif depositInto(a.products, outSlot, newStack, newStack.size or 1) > 0 then
+                return
+              end
+            end
+            -- Every output slot full and none compatible -- real Forestry
+            -- would just have nowhere to put it either; drop it silently
+            -- rather than erroring, matching "the apiary is jammed" but
+            -- for a demo/local run this only happens if you're not
+            -- harvesting at all.
           end
 
           addProduct(toStack(newPrincess, "princess"))
@@ -511,12 +676,19 @@ function M.install(config, sites, opts)
       end
       return (a.workTicks / a.workNeeded) * 100
     end,
+    -- The princess/queen slot only ever accepts princess/queen items --
+    -- per your spec, "princess and drone breeding take 2 and can only
+    -- occupy their respective slots". Swapping in anything else (a
+    -- drone, an empty selection) fails outright rather than silently
+    -- accepting it, so a manager logic bug (picking the wrong slot)
+    -- shows up as a failed swap instead of corrupting apiary state.
     swapQueen = function(side)
       if side ~= DOWN then return false end
       local a = apiaryAt(world.drone.x, world.drone.z)
       if not a then return false end
       local selected = world.drone._selected
       local newQueen = world.drone.inventory[selected]
+      if newQueen and not isPrincessOrQueenStack(newQueen) then return false end
       local oldQueenRaw = a.princessRaw
       a.princessRaw = newQueen and newQueen.individual and rawFromIndividual(newQueen.individual) or nil
       world.drone.inventory[selected] = oldQueenRaw and toStack(oldQueenRaw, "princess") or nil
@@ -529,6 +701,7 @@ function M.install(config, sites, opts)
       if not a then return false end
       local selected = world.drone._selected
       local newDrone = world.drone.inventory[selected]
+      if newDrone and not isDroneStack(newDrone) then return false end
       local oldDroneRaw = a.droneRaw
       a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual) or nil
       world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil

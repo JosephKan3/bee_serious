@@ -121,12 +121,18 @@ end
 
 if uiEnabled then
   local UI = require("bee_keeper_ui")
-  local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos }
-  Status.onChange = function()
+  local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos, trashPos = config.trashPos }
+  local function redraw()
     UI.draw(config.sites, Nav.getPos(), extras, Status.get(), Sim.world.drone.energy,
       M.listCargo(config), listSimStorage())
     Sim.realSleep(Sim.secondsPerAction)
   end
+  Status.onChange = redraw
+  -- Fires once per individual block moved (see bee_keeper_nav.lua's
+  -- M.onStep), not just once per whole gotoXZ call -- without this,
+  -- movement would jump straight to the destination instead of actually
+  -- rendering block-by-block.
+  Nav.onStep = redraw
 else
   Status.onChange = function()
     print("  [" .. Status.get().step .. "]")
