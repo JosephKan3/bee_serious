@@ -869,6 +869,44 @@ do
 end
 
 -- ============================================================
+-- Test: a product slot holding SEVERAL genetically identical drones
+-- (they stack, same as cargo) must be pulled in ONE visit, not one unit
+-- at a time -- a hardcoded suckFromSlot(..., 1) left the rest sitting
+-- there indefinitely, since a fresh visit re-peeks and re-requests just
+-- 1 again every time. This test's mock suckFromSlot doesn't cap by
+-- count itself (see its header notes), so it can't distinguish old vs
+-- new behavior by outcome alone -- it records exactly what count
+-- harvestSite actually requested instead.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local active, inactive = { fertility = 2 }, { fertility = 2 }
+  local stackedProduct = mockBeeStack(active, inactive, true)
+  stackedProduct.size = 3
+  apiary(DOWN)[7] = stackedProduct
+
+  local config = { workingSlots = { 5, 6 }, productSlots = { 7 } }
+  local site = { name = "harvest-stacked-product-site", x = 5, z = 9, mode = "traitmax" }
+
+  local requestedCount = nil
+  local origSuckFromSlot = mockComponent.inventory_controller.suckFromSlot
+  mockComponent.inventory_controller.suckFromSlot = function(side, slot, count)
+    requestedCount = count
+    return origSuckFromSlot(side, slot, count)
+  end
+
+  M.harvestSite(config, site)
+  mockComponent.inventory_controller.suckFromSlot = origSuckFromSlot
+
+  check("harvestSite requests the WHOLE stack (3), not a hardcoded 1",
+    requestedCount == 3, "requested=" .. tostring(requestedCount))
+end
+
+-- ============================================================
 -- Test: dumpToStorage flies to storagePos and drops discarded drones
 -- ============================================================
 

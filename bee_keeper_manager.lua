@@ -720,10 +720,18 @@ function M.harvestSite(config, site, productSlots)
         if workingSlot then
           -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
           -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
-          -- it does not auto-pick an empty slot on its own.
+          -- it does not auto-pick an empty slot on its own. Pulls the
+          -- WHOLE stack in one go (peek.size), not a hardcoded 1 -- a
+          -- product slot holding several genetically identical drones
+          -- (they stack, same as cargo) otherwise only ever gave up one
+          -- unit per visit, leaving the rest sitting there indefinitely
+          -- since a fresh visit re-peeks and re-splits the same way
+          -- every time. Real hardware/suckFromSlot itself still caps
+          -- this at whatever the destination has room for, same as any
+          -- other transfer.
           agent().select(workingSlot)
-          local moved = invCtrl().suckFromSlot(down, productSlot, 1)
-          if moved and moved > 0 then harvested = harvested + 1 end
+          local moved = invCtrl().suckFromSlot(down, productSlot, peek.size)
+          if moved and moved > 0 then harvested = harvested + moved end
         end
       end
     end
