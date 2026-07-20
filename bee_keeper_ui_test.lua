@@ -222,6 +222,47 @@ do
 end
 
 -- ============================================================
+-- Test: the map is ONE CHARACTER PER BLOCK, not stretched to fill the
+-- reserved map area -- a small real-world area (here, 4x6) must render
+-- as a small patch of dots with blank whitespace around it, not a
+-- screen-sized grid of periods (the actual real-hardware bug reported:
+-- a 4x6 scanned area rendered as a giant dot-filled map).
+-- ============================================================
+
+do
+  local sites = {
+    { name = "site1", x = 0, z = 0, mode = "traitmax" },
+    { name = "site2", x = 3, z = 5, mode = "traitmax" },
+  }
+  local dronePos = { x = 1, z = 1 }
+  -- width=60 -> mapWidth = floor(60*0.55) = 33, contentHeight = 20-4 = 16
+  -- -- both FAR bigger than the real 4x6 (x:0-3, z:0-5) area.
+  local rows = UI.renderBuffer(sites, dronePos, {}, { step = "x", history = {} }, nil, 60, 20)
+
+  local dotCount = 0
+  for _, row in ipairs(rows) do
+    for _ in row:gmatch("%.") do dotCount = dotCount + 1 end
+  end
+  -- The real area is 4 wide (x: 0..3) x 6 tall (z: 0..5) = 24 cells, minus
+  -- however many are covered by symbols instead of ".". Anything even
+  -- close to the full 33x16 map area (528 cells) means it's still
+  -- stretching instead of rendering 1 block = 1 character.
+  check("a small real area renders as a small patch of dots, not a screen-filling grid",
+    dotCount <= 24, "dotCount=" .. dotCount)
+
+  -- The reserved map area is still 33 wide -- just mostly blank space
+  -- past the real area, not periods. Only checking actual map rows (not
+  -- the STEP header/separator/footer rows, which have unrelated content
+  -- at that column).
+  local mapWidth = 33
+  local blankFound = false
+  for i = 3, #rows - 2 do
+    if rows[i]:sub(mapWidth, mapWidth) == " " then blankFound = true end
+  end
+  check("space beyond the real area is blank whitespace, not more dots", blankFound)
+end
+
+-- ============================================================
 -- Test: degenerate layouts (single site, or drone/sites all at one point)
 -- don't error and still place a mark somewhere sensible
 -- ============================================================

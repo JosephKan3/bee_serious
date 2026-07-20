@@ -75,27 +75,16 @@ local function boundingBox(points)
   return minX or 0, maxX or 0, minZ or 0, maxZ or 0
 end
 
--- Maps a world (x,z) to a (col,row) within a mapWidth x mapHeight grid,
--- given the bounding box. Degenerate (zero-size) boxes map to the center.
-local function project(x, z, minX, maxX, minZ, maxZ, mapWidth, mapHeight)
-  local spanX = maxX - minX
-  local spanZ = maxZ - minZ
-  local col, row
-
-  if spanX == 0 then
-    col = math.floor(mapWidth / 2)
-  else
-    col = math.floor((x - minX) / spanX * (mapWidth - 1)) + 1
-  end
-
-  if spanZ == 0 then
-    row = math.floor(mapHeight / 2)
-  else
-    row = math.floor((z - minZ) / spanZ * (mapHeight - 1)) + 1
-  end
-
-  col = math.max(1, math.min(mapWidth, col))
-  row = math.max(1, math.min(mapHeight, row))
+-- Maps a world (x,z) to a (col,row) within a mapWidth x mapHeight grid, ONE
+-- CHARACTER PER BLOCK -- not stretched/scaled to fill the available area.
+-- A real 4x6 scanned area should render as a compact 4x6 patch of dots
+-- with the rest of the reserved map area left blank, not a screen-sized
+-- grid of periods. Clipped (not scaled) if the real area is somehow
+-- larger than the available space, so a huge area still degrades
+-- gracefully instead of erroring.
+local function project(x, z, minX, minZ, mapWidth, mapHeight)
+  local col = math.max(1, math.min(mapWidth, x - minX + 1))
+  local row = math.max(1, math.min(mapHeight, z - minZ + 1))
   return col, row
 end
 
@@ -152,18 +141,29 @@ function M.renderBuffer(sites, dronePos, extras, statusInfo, chargePercent, widt
 
   local minX, maxX, minZ, maxZ = boundingBox(points)
 
+  -- Real block span: one character per block, not stretched to fill the
+  -- reserved map area -- see M.draw's header notes on why. Clipped to the
+  -- available area (not scaled) so an unusually large scan still degrades
+  -- gracefully instead of erroring.
+  local spanX = math.max(1, math.min(mapWidth, maxX - minX + 1))
+  local spanZ = math.max(1, math.min(contentHeight, maxZ - minZ + 1))
+
   -- Build the map as a grid of characters, sites first so the drone (drawn
   -- last) always wins any overlap -- both in the text grid and in which
-  -- placement gets recorded last for that cell.
+  -- placement gets recorded last for that cell. Only cells within the
+  -- real span get a "." background -- anything beyond it is blank
+  -- whitespace, not more periods.
   local grid = {}
   for r = 1, contentHeight do
     grid[r] = {}
-    for c = 1, mapWidth do grid[r][c] = "." end
+    for c = 1, mapWidth do
+      grid[r][c] = (r <= spanZ and c <= spanX) and "." or " "
+    end
   end
 
   local placements = {}
   local function place(x, z, symbol, colorKey)
-    local col, row = project(x, z, minX, maxX, minZ, maxZ, mapWidth, contentHeight)
+    local col, row = project(x, z, minX, minZ, spanX, spanZ)
     grid[row][col] = symbol
     table.insert(placements, { row = row + rowOffset, col = col, char = symbol, colorKey = colorKey })
   end
