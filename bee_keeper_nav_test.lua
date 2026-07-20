@@ -101,6 +101,32 @@ do
 end
 
 -- ============================================================
+-- Test: M.onStep fires once per individual block moved, with Nav.getPos()
+-- already reflecting that step -- not just once at the end of the whole
+-- gotoXZ call. This is what lets a UI render movement block-by-block
+-- instead of the position jumping straight to the destination.
+-- ============================================================
+
+do
+  resetRobot()
+  Nav.setHome(70)
+
+  local stepPositions = {}
+  Nav.onStep = function()
+    local p = Nav.getPos()
+    table.insert(stepPositions, p.x .. ":" .. p.z)
+  end
+  Nav.gotoXZ(0, 3)
+  Nav.onStep = nil
+
+  check("onStep fired once per block (3 blocks moved)", #stepPositions == 3,
+    "count=" .. #stepPositions)
+  check("onStep saw the position update incrementally, not just at the end",
+    stepPositions[1] == "0:1" and stepPositions[2] == "0:2" and stepPositions[3] == "0:3",
+    table.concat(stepPositions, ","))
+end
+
+-- ============================================================
 -- Test: gotoXZ from a non-origin position computes the correct relative
 -- path (not an absolute move)
 -- ============================================================

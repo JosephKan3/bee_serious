@@ -61,6 +61,14 @@ local facing = 1
 -- safeForward() does.
 M.MAX_RETRIES = 20
 
+-- Optional callback fired once per individual block moved (see
+-- stepForward), NOT once per whole gotoXZ call. nil by default -- purely
+-- additive, real hardware runs never set this. Lets a UI (see
+-- bee_keeper_local_sim_run.lua) redraw after every step so movement
+-- actually renders block-by-block instead of jumping straight to the
+-- destination.
+M.onStep = nil
+
 function M.getPos() return { x = pos.x, z = pos.z } end
 function M.getAltitude() return y end
 function M.getFacing() return facing end
@@ -122,11 +130,16 @@ local function turningCost(target)
   return math.min(delta, 4 - delta)
 end
 
--- Steps forward up to `count` times in the CURRENT facing. Returns how
--- many steps actually succeeded (so a partial failure mid-leg can still
--- be reflected accurately in tracked position) plus a reason if it
--- didn't complete all of them.
-local function stepForward(count)
+-- Steps forward up to `count` times in the given facing, updating `pos`
+-- incrementally after EACH block (not just once at the end) so
+-- Nav.getPos() is always accurate mid-walk and M.onStep -- if set --
+-- fires once per block. That's what lets a UI (see
+-- bee_keeper_local_sim_run.lua) actually render block-by-block movement
+-- instead of the position jumping straight to the destination. Returns
+-- how many steps actually succeeded (so a partial failure mid-leg can
+-- still be reflected accurately) plus a reason if it didn't complete all
+-- of them.
+local function stepForward(facingDir, count)
   local completed = 0
   for _ = 1, count do
     local attempts = 0
@@ -137,6 +150,13 @@ local function stepForward(count)
       end
     end
     completed = completed + 1
+
+    if facingDir == 2 then pos.x = pos.x + 1
+    elseif facingDir == 4 then pos.x = pos.x - 1
+    elseif facingDir == 1 then pos.z = pos.z + 1
+    elseif facingDir == 3 then pos.z = pos.z - 1 end
+
+    if M.onStep then M.onStep() end
   end
   return completed, nil
 end
@@ -169,23 +189,20 @@ function M.gotoXZ(targetX, targetZ)
     path[1], path[2] = path[2], path[1]
   end
 
-  local traveled = { x = pos.x, z = pos.z }
   for _, leg in ipairs(path) do
     turnTo(leg[1])
-    local completed, reason = stepForward(leg[2])
-
-    if leg[1] == 2 then traveled.x = traveled.x + completed
-    elseif leg[1] == 4 then traveled.x = traveled.x - completed
-    elseif leg[1] == 1 then traveled.z = traveled.z + completed
-    elseif leg[1] == 3 then traveled.z = traveled.z - completed end
+    local _, reason = stepForward(leg[1], leg[2])
 
     if reason then
-      pos = traveled
+      -- pos already reflects exactly how far it actually got (updated
+      -- incrementally inside stepForward), nothing further to reconcile.
       Status.setStep(string.format("STUCK walking to (%d,%d): %s", targetX, targetZ, reason))
       return false, reason
     end
   end
 
+  -- Safety pin -- should already equal this exactly given the
+  -- incremental updates above, but guards against any accumulated drift.
   pos = { x = targetX, z = targetZ }
   return true
 end
