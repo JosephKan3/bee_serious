@@ -441,13 +441,22 @@ function M.harvestSite(config, site, productSlots)
   if not ok then return 0 end
 
   local down = sides().down
+  -- A Robot's inventory_controller.suckFromSlot validates the slot against
+  -- the TARGET inventory's real size and throws "invalid slot" for
+  -- anything beyond it -- unlike a Transposer (what the old beeManager.lua
+  -- used with this same 7-15 range), which just silently returns nil for
+  -- an out-of-range slot. Different apiary tiers/types have different
+  -- inventory sizes, so this asks the real hardware instead of assuming.
+  local size = invCtrl().getInventorySize(down)
   local harvested = 0
   for _, productSlot in ipairs(productSlots) do
-    for _, workingSlot in ipairs(config.workingSlots) do
-      if M.readOwnSlot(workingSlot) == nil then
-        local moved = invCtrl().suckFromSlot(down, productSlot, 1)
-        if moved and moved > 0 then harvested = harvested + 1 end
-        break
+    if not size or productSlot <= size then
+      for _, workingSlot in ipairs(config.workingSlots) do
+        if M.readOwnSlot(workingSlot) == nil then
+          local moved = invCtrl().suckFromSlot(down, productSlot, 1)
+          if moved and moved > 0 then harvested = harvested + 1 end
+          break
+        end
       end
     end
   end

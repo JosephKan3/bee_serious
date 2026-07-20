@@ -82,6 +82,10 @@ mockComponent.robot = {
 }
 
 mockComponent.inventory_controller = {
+  -- M.harvestSite queries this to guard against slot numbers beyond a real
+  -- inventory's actual size (see its header notes) -- 15 is "big enough"
+  -- for this test's fixtures, same reasoning as bee_keeper_sim.lua's fake.
+  getInventorySize = function(_side) return 15 end,
   getStackInInternalSlot = function(slot)
     return world.agentInventory[slot]
   end,

@@ -141,7 +141,16 @@ local function main(args)
         print(line)
       end
     end
-    os.sleep(2)
+    -- NOT a fixed real-time delay -- each cycle's actual work (walking,
+    -- polling beekeeper.getBeeProgress, swapping bees) already costs real
+    -- game time via OpenComputers' own component-call yielding, so a flat
+    -- multi-second sleep on top of that only adds latency for no benefit.
+    -- This is the minimum yield OpenComputers needs to avoid a "too long
+    -- without yielding" VM error on a cycle that happens to do nothing at
+    -- all (every site already visited this tick, nothing to swap/harvest)
+    -- -- everything else about pacing comes from the real actions
+    -- themselves, not from waiting here.
+    os.sleep(0.05)
   end
 end
 

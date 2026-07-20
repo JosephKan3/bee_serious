@@ -39,19 +39,21 @@ return {
   storageSlotCount = 27,
 
   -- Block names the area scan (bee_keeper_setup.lua) treats as "this is an
-  -- apiary" / "this is the storage chest", matched against
+  -- apiary" / "this is the storage container", matched against
   -- geolyzer.analyze(sides.down).name. "Forestry:apiculture" confirmed via
   -- probeBlockBelow() against a real apiary -- note the capital F, and
   -- "apiculture" not "apiary" (both wrong in the earlier guess). If you
   -- also use an Alveary or Industrial Apiary, probe one of those too --
-  -- no reason to assume they report the same name. storageBlockNames is
-  -- just a plain chest (confirmed vanilla block name, no guessing needed).
+  -- no reason to assume they report the same name. Add any storage
+  -- container's real block name here the same way -- "etfuturum:barrel"
+  -- was added after the scan failed to recognize a barrel as storage.
   apiaryBlockNames = {
     "Forestry:apiculture",
   },
   storageBlockNames = {
     "minecraft:chest",
     "minecraft:trapped_chest",
+    "etfuturum:barrel",
   },
 
   -- Whether bee_keeper_setup.lua flies the 4 corners (with a light flash)

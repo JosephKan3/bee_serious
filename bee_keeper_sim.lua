@@ -354,6 +354,12 @@ function M.install(config, sites, opts)
   }
 
   component.inventory_controller = {
+    -- 15 covers the widest range this sim's apiaries/storage ever use
+    -- (config.productSlots, config.storageSlotCount) -- real hardware
+    -- reports its own real size per-inventory; this just needs to be
+    -- "big enough" so M.harvestSite's size-guard never filters out a
+    -- product slot the sim actually populates.
+    getInventorySize = function(side) return side == DOWN and 15 or nil end,
     getStackInInternalSlot = function(slot) return world.drone.inventory[slot] end,
     getStackInSlot = function(side, slot)
       if side ~= DOWN then return nil end
