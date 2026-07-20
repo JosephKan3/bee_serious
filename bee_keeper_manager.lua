@@ -338,6 +338,15 @@ function M.runQualitySite(config, site)
     if M.readSideSlot(down, 1) ~= nil then
       return string.format("working (%.0f%%)", progress)
     end
+
+    -- Breeding just completed -- her offspring/output is sitting in the
+    -- apiary's product slots RIGHT NOW, not yet in cargo, and definitely
+    -- not analyzed yet. Harvest and analyze it immediately, before
+    -- falling through to seed+evaluate+load below, so it's actually
+    -- available as a candidate for the very next pairing decision
+    -- instead of sitting unanalyzed until some later, unrelated visit.
+    M.harvestSite(config, site)
+    M.analyzeWorkingSlots(config)
   end
 
   local princessIndividual = M.readSideSlot(down, 1)
@@ -569,6 +578,13 @@ function M.runMutationSite(config, site)
     if M.readSideSlot(down, 1) ~= nil then
       return string.format("attempting (%.0f%%)", progress)
     end
+
+    -- Same reasoning as runQualitySite's identical step: harvest and
+    -- analyze the just-created offspring/output immediately, before
+    -- planning the next attempt below, so it's actually available as a
+    -- candidate right away.
+    M.harvestSite(config, site)
+    M.analyzeWorkingSlots(config)
   end
 
   -- Same last-known purity cache as runQualitySite (see the note there).
