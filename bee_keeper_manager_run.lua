@@ -46,6 +46,23 @@ if logFile then
     logFile:write(table.concat(parts, "\t") .. "\n")
     logFile:flush()
   end
+
+  -- bee_keeper_setup.lua's prompts (promptNumber/promptYesNo) write via
+  -- io.write, not print (no trailing newline, since the cursor needs to
+  -- stay on the same line for input) -- without this, a crash or hang
+  -- during/right after a prompt would leave the log showing nothing at
+  -- all past "run started", indistinguishable from "still waiting on
+  -- input" vs "actually crashed". Tee'd the same way, one log line per
+  -- write call so it stays readable even without the missing newline.
+  local realWrite = io.write
+  io.write = function(...)
+    realWrite(...)
+    local n = select("#", ...)
+    local parts = {}
+    for i = 1, n do parts[i] = tostring(select(i, ...)) end
+    logFile:write(table.concat(parts, "") .. "\n")
+    logFile:flush()
+  end
 end
 
 -- Captured at chunk scope -- `...` (the args OpenOS passes this script)
