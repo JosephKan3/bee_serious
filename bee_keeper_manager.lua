@@ -996,6 +996,17 @@ function M.runCycle(config)
       status = "unknown_mode:" .. tostring(site.mode)
     end
     table.insert(log, string.format("[%s] %s: %s", site.mode, site.name or "?", status))
+
+    -- Catch anything the decide-phase itself just produced (a queen's
+    -- FINAL work tick creates her offspring/output immediately, inside
+    -- runQualitySite/runMutationSite's own getBeeProgress call, which
+    -- runs AFTER harvestSite above in this same visit). Without this,
+    -- freshly bred output sits unharvested for a full extra cycle even
+    -- though the robot is still standing right there -- it only gets
+    -- picked up the NEXT time this apiary happens to be visited again.
+    -- No extra travel: gotoSite/harvestSite is a no-op if there's
+    -- nothing new to harvest.
+    M.harvestSite(config, site)
   end
 
   -- If any site came up genuinely empty-handed this cycle, storage might
