@@ -706,6 +706,48 @@ function M.dumpToTrash(config, discardEntries, keepId)
 end
 
 -- ============================================================
+-- Restocking: pull analyzed bees back OUT of storage into free working
+-- slots. Without this, once a drone is flown to storage it's gone from
+-- the breeding pool forever from the algorithm's point of view, even
+-- though it's still physically sitting right there -- storage becomes a
+-- one-way trip instead of a real fallback pool. Called from M.runCycle
+-- when a site's decision came up empty-handed (no usable candidates in
+-- cargo at all).
+-- ============================================================
+
+function M.restockFromStorage(config)
+  if not config.storagePos then return 0 end
+
+  local freeSlots = {}
+  for _, slot in ipairs(config.workingSlots) do
+    if invCtrl().getStackInInternalSlot(slot) == nil then table.insert(freeSlots, slot) end
+  end
+  if #freeSlots == 0 then return 0 end
+
+  Status.setStep("Restocking from storage")
+  local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
+  if not ok then return 0 end
+
+  local down = sides().down
+  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+  local restocked = 0
+  local freeIdx = 1
+  for slot = 1, size do
+    if freeIdx > #freeSlots then break end
+    local stack = invCtrl().getStackInSlot(down, slot)
+    if stack and readIndividual(stack) then
+      agent().select(freeSlots[freeIdx])
+      local moved = invCtrl().suckFromSlot(down, slot, 1)
+      if moved and moved > 0 then
+        restocked = restocked + 1
+        freeIdx = freeIdx + 1
+      end
+    end
+  end
+  return restocked
+end
+
+-- ============================================================
 -- Analysis: find unanalyzed bees in working slots and analyze them
 -- ============================================================
 
@@ -832,6 +874,25 @@ function M.runCycle(config)
       status = "unknown_mode:" .. tostring(site.mode)
     end
     table.insert(log, string.format("[%s] %s: %s", site.mode, site.name or "?", status))
+  end
+
+  -- If any site came up genuinely empty-handed this cycle, storage might
+  -- still have something usable sitting in it -- one bounded trip (not
+  -- per-site) pulls bees back into cargo so the NEXT cycle's decisions
+  -- actually see them, instead of storage being a one-way trip nothing
+  -- ever gets read back from.
+  local needsRestock = false
+  for _, entry in ipairs(log) do
+    if entry:find("no_candidate_drones_in_working_slots", 1, true)
+      or entry:find("no_princess_at_site_or_in_cargo", 1, true) then
+      needsRestock = true
+    end
+  end
+  if needsRestock then
+    local restocked = M.restockFromStorage(config)
+    if restocked > 0 then
+      table.insert(log, string.format("[restock] pulled %d bee(s) back from storage", restocked))
+    end
   end
 
   if config.needCharge == nil or config.needCharge then

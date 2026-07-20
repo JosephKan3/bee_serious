@@ -774,6 +774,87 @@ do
 end
 
 -- ============================================================
+-- Test: restockFromStorage pulls analyzed bees back into free working
+-- slots -- without this, storage is a one-way trip nothing ever gets
+-- read back from, even though the bees are still physically sitting
+-- right there.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+
+  world.dronePos = { x = 0, z = 0 } -- seed storage contents at the storage position
+  apiary(DOWN)[1] = mockBeeStack({ fertility = 4 }, { fertility = 4 }, true)
+  apiary(DOWN)[2] = { name = "forestry:honey_drop", size = 64 } -- non-bee item, should be skipped
+  world.dronePos = { x = 99, z = 99 }
+
+  world.agentInventory[10] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true) -- occupies slot 10
+
+  local config = {
+    workingSlots = { 10, 11, 12 }, -- 11,12 free
+    storagePos = { x = 0, z = 0 },
+    storageSlotCount = 10,
+  }
+
+  local restocked = M.restockFromStorage(config)
+  check("restockFromStorage pulls exactly the one analyzed bee", restocked == 1, "restocked=" .. tostring(restocked))
+  check("restockFromStorage flew to storagePos", world.dronePos.x == 0 and world.dronePos.z == 0)
+
+  local foundInCargo = world.agentInventory[11] ~= nil or world.agentInventory[12] ~= nil
+  check("the restocked bee landed in a free working slot", foundInCargo)
+  check("the non-bee item was left behind in storage",
+    apiary(DOWN)[2] ~= nil and apiary(DOWN)[2].name == "forestry:honey_drop")
+end
+
+do
+  -- No free working slots -- should not even attempt the trip.
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+  world.agentInventory[10] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+
+  local config = { workingSlots = { 10 }, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockFromStorage(config)
+  check("restockFromStorage does nothing when cargo has no free slots", restocked == 0)
+  check("restockFromStorage never flew anywhere when there was nothing to restock",
+    world.dronePos.x == 99 and world.dronePos.z == 99)
+end
+
+-- ============================================================
+-- Test: runCycle triggers a restock trip when a site's decision comes up
+-- with no usable candidates at all, so the NEXT cycle actually sees
+-- whatever storage had to offer.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 0, z = 0 } -- seed storage first
+  apiary(DOWN)[1] = mockBeeStack({ fertility = 4 }, { fertility = 4 }, true)
+
+  world.dronePos = { x = 5, z = 5 }
+  -- Site's apiary has a princess already, but cargo has ZERO drone
+  -- candidates at all -- should trigger a restock.
+  local traitList = M.traitListFor("traitmax")
+  local pActive, pInactive = makeAlleles(traitList, {})
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+
+  local config = {
+    workingSlots = { 10, 11 }, -- both free
+    minCopies = 2,
+    storagePos = { x = 0, z = 0 },
+    storageSlotCount = 10,
+    sites = { { name = "site1", x = 5, z = 5, mode = "traitmax" } },
+  }
+
+  M.runCycle(config)
+  local foundInCargo = world.agentInventory[10] ~= nil or world.agentInventory[11] ~= nil
+  check("runCycle restocked from storage after a site found no candidates", foundInCargo)
+end
+
+-- ============================================================
 -- Test: loadSites merges persisted (x,z) with mode/targetSpecies overrides
 -- ============================================================
 
