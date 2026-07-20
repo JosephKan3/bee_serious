@@ -371,17 +371,17 @@ function M.install(config, sites, opts)
       if a.products and a.products[slot] then return a.products[slot] end
       return nil
     end,
+    -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot above --
+    -- not an auto-picked empty slot (matches real hardware; see
+    -- bee_keeper_manager.lua's M.harvestSite header notes).
     suckFromSlot = function(side, slot)
       if side ~= DOWN then return 0 end
       local a = apiaryAt(world.drone.x, world.drone.z)
-      if a and a.products and a.products[slot] then
-        for i = 1, 16 do
-          if world.drone.inventory[i] == nil then
-            world.drone.inventory[i] = a.products[slot]
-            a.products[slot] = nil
-            return 1
-          end
-        end
+      local selected = world.drone._selected
+      if a and a.products and a.products[slot] and world.drone.inventory[selected] == nil then
+        world.drone.inventory[selected] = a.products[slot]
+        a.products[slot] = nil
+        return 1
       end
       return 0
     end,

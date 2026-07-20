@@ -92,17 +92,17 @@ mockComponent.inventory_controller = {
   getStackInSlot = function(side, slot)
     return apiary(side)[slot]
   end,
+  -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot/swapQueen/
+  -- swapDrone below -- NOT an auto-picked empty slot. This is what caught
+  -- M.harvestSite forgetting to select() before calling this on real
+  -- hardware: harvesting silently produced nothing.
   suckFromSlot = function(side, slot, count)
     local stack = apiary(side)[slot]
     if not stack then return 0 end
-    for i = 1, 16 do
-      if world.agentInventory[i] == nil then
-        world.agentInventory[i] = stack
-        apiary(side)[slot] = nil
-        return 1
-      end
-    end
-    return 0
+    if world.agentInventory[world.selectedSlot] ~= nil then return 0 end
+    world.agentInventory[world.selectedSlot] = stack
+    apiary(side)[slot] = nil
+    return 1
   end,
   dropIntoSlot = function(side, slot)
     local stack = world.agentInventory[world.selectedSlot]

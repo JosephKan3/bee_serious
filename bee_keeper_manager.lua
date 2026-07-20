@@ -453,6 +453,14 @@ function M.harvestSite(config, site, productSlots)
     if not size or productSlot <= size then
       for _, workingSlot in ipairs(config.workingSlots) do
         if M.readOwnSlot(workingSlot) == nil then
+          -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
+          -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
+          -- it does not auto-pick an empty slot on its own. Without this,
+          -- it silently lands in (or fails against) whatever slot was
+          -- selected last, which is why harvesting produced nothing on
+          -- real hardware despite the apiary genuinely having product to
+          -- pull.
+          agent().select(workingSlot)
           local moved = invCtrl().suckFromSlot(down, productSlot, 1)
           if moved and moved > 0 then harvested = harvested + 1 end
           break
