@@ -218,6 +218,11 @@ local function isPrincessOrQueenStack(stack)
   return lower:find("princess") ~= nil or lower:find("queen") ~= nil
 end
 
+local function isDroneStack(stack)
+  if not stack or not stack.name then return false end
+  return stack.name:lower():find("drone") ~= nil
+end
+
 -- Gathers usable candidate DRONES from the working slots (analyzed bees
 -- only -- unanalyzed ones are queued for analysis instead, see
 -- M.analyzeWorkingSlots). Explicitly excludes princess/queen items --
@@ -404,17 +409,27 @@ function M.lookupMutationParents(config, targetSpecies)
 end
 
 -- Groups the agent's working-slot bees by species name (Cfg.speciesKey),
--- keeping a princess-capable and drone-capable list. Forestry doesn't
--- generally care which side (princess/drone) a species enters a mutation
--- from, so both roles are gathered per species.
+-- keeping SEPARATE princess-capable and drone-capable lists per species.
+-- Forestry doesn't care which NAMED species ends up as the princess vs
+-- the drone in a mutation -- but it absolutely cares that the princess
+-- slot gets an actual princess/queen item and the drone slot gets an
+-- actual drone. Mixing both roles into one list per species (the old
+-- behavior) could pick a DRONE as the "princess" candidate whenever it
+-- happened to score best, which swapQueen then correctly rejects.
 local function groupBySpecies(config)
   local bySpecies = {}
   for _, slot in ipairs(config.workingSlots) do
-    local individual = M.readOwnSlot(slot)
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local individual = readIndividual(stack)
     if individual then
       local name = Cfg.speciesKey(individual.active.species)
-      bySpecies[name] = bySpecies[name] or {}
-      table.insert(bySpecies[name], { slot = slot, individual = individual })
+      bySpecies[name] = bySpecies[name] or { princesses = {}, drones = {} }
+      local entry = { slot = slot, individual = individual }
+      if isPrincessOrQueenStack(stack) then
+        table.insert(bySpecies[name].princesses, entry)
+      elseif isDroneStack(stack) then
+        table.insert(bySpecies[name].drones, entry)
+      end
     end
   end
   return bySpecies
@@ -454,19 +469,31 @@ function M.planMutation(config, targetSpecies, traitList)
   for _, recipe in ipairs(recipes) do
     local nameA = Cfg.speciesKey(recipe.allele1)
     local nameB = Cfg.speciesKey(recipe.allele2)
-    local haveA = held[nameA]
-    local haveB = held[nameB]
+    local groupA = held[nameA]
+    local groupB = held[nameB]
 
-    if haveA and haveB then
+    -- Try both arrangements -- Forestry doesn't care which NAMED species
+    -- ends up as the princess vs the drone, only that one side is a
+    -- genuine princess/queen and the other a genuine drone.
+    local arrangement = nil
+    if groupA and groupB and #groupA.princesses > 0 and #groupB.drones > 0 then
+      arrangement = { princessGroup = groupA.princesses, droneGroup = groupB.drones,
+                       princessSpecies = nameA, droneSpecies = nameB }
+    elseif groupA and groupB and #groupB.princesses > 0 and #groupA.drones > 0 then
+      arrangement = { princessGroup = groupB.princesses, droneGroup = groupA.drones,
+                       princessSpecies = nameB, droneSpecies = nameA }
+    end
+
+    if arrangement then
       if recipe.chance > bestChance then
-        local princessPick = bestOfSpecies(haveA, traitList)
-        local dronePick = bestOfSpecies(haveB, traitList)
+        local princessPick = bestOfSpecies(arrangement.princessGroup, traitList)
+        local dronePick = bestOfSpecies(arrangement.droneGroup, traitList)
         bestChance = recipe.chance
         best = { princessSlot = princessPick.slot, droneSlot = dronePick.slot, chance = recipe.chance,
-                 princessSpecies = nameA, droneSpecies = nameB }
+                 princessSpecies = arrangement.princessSpecies, droneSpecies = arrangement.droneSpecies }
       end
     elseif not missingReport then
-      missingReport = string.format("need one of '%s' and one of '%s' (%.0f%% base chance)",
+      missingReport = string.format("need a princess/queen of '%s' and a drone of '%s' (or vice versa) (%.0f%% base chance)",
         nameA, nameB, recipe.chance)
     end
   end
@@ -764,14 +791,12 @@ end
 -- Finds honey/honeydew wherever it actually is in the agent's own
 -- inventory, rather than assuming it's permanently sitting in
 -- config.honeySlot. Searches the WHOLE inventory (not just
--- workingSlots, which deliberately excludes honeySlot by convention) --
--- if that fixed slot ever runs dry, or honey gets restocked into a
--- different slot, the old fixed-slot behavior would just silently keep
--- failing to analyze anything with no way to recover. Falls back to
--- config.honeySlot if nothing matches (e.g. real hardware reports a
--- different item name than expected -- better to try the configured
--- slot than analyze nothing at all).
-local function findHoneySlot(config)
+-- workingSlots, which deliberately excludes honeySlot by convention).
+-- Returns nil if nothing matches -- NO config.honeySlot fallback here
+-- (see M.analyzeWorkingSlots, which tries restocking from storage first
+-- and only falls back to the configured slot as an absolute last
+-- resort).
+local function searchForHoney()
   local size = robotLib().inventorySize() or 16
   for slot = 1, size do
     local stack = invCtrl().getStackInInternalSlot(slot)
@@ -782,12 +807,61 @@ local function findHoneySlot(config)
       end
     end
   end
-  return config.honeySlot
+  return nil
+end
+
+-- Flies to a honey source (config.honeyStoragePos, a dedicated location
+-- if you keep honey separate from general storage, falling back to
+-- config.storagePos) and pulls a full stack back into a free working
+-- slot. Without this, once cargo's honey genuinely runs dry there was no
+-- way to recover even with a full stack sitting in a chest -- analysis
+-- would just silently stop working forever.
+function M.restockHoney(config)
+  local honeyPos = config.honeyStoragePos or config.storagePos
+  if not honeyPos then return false end
+
+  local freeSlot = nil
+  for _, slot in ipairs(config.workingSlots) do
+    if invCtrl().getStackInInternalSlot(slot) == nil then
+      freeSlot = slot
+      break
+    end
+  end
+  if not freeSlot then return false end
+
+  Status.setStep("Fetching honey from storage")
+  local ok = Nav.gotoXZ(honeyPos.x, honeyPos.z)
+  if not ok then return false end
+
+  local down = sides().down
+  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+  for slot = 1, size do
+    local stack = invCtrl().getStackInSlot(down, slot)
+    if stack and stack.name then
+      local lower = stack.name:lower()
+      if lower:find("honey") or lower:find("honeydew") then
+        agent().select(freeSlot)
+        local moved = invCtrl().suckFromSlot(down, slot, 64)
+        if moved and moved > 0 then return true end
+      end
+    end
+  end
+  return false
 end
 
 function M.analyzeWorkingSlots(config)
   local analyzed = 0
-  local honeySlot = findHoneySlot(config)
+  local honeySlot = searchForHoney()
+  if not honeySlot then
+    -- Cargo genuinely has none -- try fetching more before giving up.
+    if M.restockHoney(config) then
+      honeySlot = searchForHoney()
+    end
+  end
+  -- Absolute last resort: real hardware might report a different item
+  -- name than expected -- better to try the configured slot than
+  -- analyze nothing at all.
+  honeySlot = honeySlot or config.honeySlot
   if not honeySlot then return 0 end
 
   for _, slot in ipairs(config.workingSlots) do

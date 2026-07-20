@@ -91,6 +91,14 @@ local function mockPrincessStack(active, inactive, isAnalyzed)
   return { name = "Forestry:beePrincessGE", individual = { active = active, inactive = inactive, isAnalyzed = isAnalyzed } }
 end
 
+-- Same, but with a real Forestry drone item name -- groupBySpecies (used
+-- by mutation pairing) now requires an actual drone-type item for the
+-- drone role, same as findPrincessCandidate requires an actual princess.
+local function mockDroneStack(active, inactive, isAnalyzed)
+  if isAnalyzed == nil then isAnalyzed = true end
+  return { name = "Forestry:beeDroneGE", individual = { active = active, inactive = inactive, isAnalyzed = isAnalyzed } }
+end
+
 local mockComponent = {}
 mockComponent.isAvailable = function(name) return name == "robot" end
 
@@ -455,9 +463,11 @@ do
   local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
 
   -- Only Forest x Meadows is satisfiable (no Common/Cultivated held) --
-  -- should be the one picked even though it's not literally the only recipe.
-  world.agentInventory[3] = mockBeeStack(forestActive, forestInactive, true)
-  world.agentInventory[4] = mockBeeStack(meadowsActive, meadowsInactive, true)
+  -- should be the one picked even though it's not literally the only
+  -- recipe. One princess, one drone -- a real mutation needs exactly one
+  -- of each (Forestry doesn't care which named species is which side).
+  world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
+  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
 
   local config = { workingSlots = { 3, 4 } }
   local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
@@ -472,6 +482,44 @@ do
   check("runMutationSite used the satisfiable Forest/Meadows pair",
     (queenSpecies == "Forest" and droneSpecies == "Meadows") or (queenSpecies == "Meadows" and droneSpecies == "Forest"),
     "queen=" .. tostring(queenSpecies) .. " drone=" .. tostring(droneSpecies))
+end
+
+-- ============================================================
+-- Test: mutation mode must NOT attempt a pairing when cargo has the
+-- right SPECIES but the wrong ITEM TYPES -- two drones, no princess at
+-- all. groupBySpecies used to lump princess/drone items together by
+-- species alone, so "the best-scoring Forest bee" could actually be a
+-- drone, picked for the princess role and handed to swapQueen (which
+-- real Forestry -- and this codebase's own type-checked simulator --
+-- rejects). Must report waiting, not attempt with mismatched types.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+  world._mutationRecipes = {
+    ["NewSpecies"] = {
+      { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
+    },
+  }
+
+  local traitList = M.traitListFor("mutation")
+  local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
+  local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
+
+  -- BOTH drones -- no princess of either species anywhere in cargo.
+  world.agentInventory[3] = mockDroneStack(forestActive, forestInactive, true)
+  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
+
+  local config = { workingSlots = { 3, 4 } }
+  local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
+
+  local status = M.runMutationSite(config, site)
+  check("runMutationSite reports waiting -- species match but no real princess exists",
+    status:match("^waiting_on_parent_species") ~= nil, status)
+  check("runMutationSite never touched the apiary's queen slot",
+    apiary(DOWN)[1] == nil)
 end
 
 -- ============================================================
@@ -562,6 +610,50 @@ do
   M.analyzeWorkingSlots(config)
   check("analyzeWorkingSlots falls back to config.honeySlot when nothing matches",
     world.lastHoneySlotUsed == 20, "used=" .. tostring(world.lastHoneySlotUsed))
+end
+
+-- ============================================================
+-- Test: analyzeWorkingSlots fetches more honey from storage when cargo
+-- has run dry, instead of immediately falling back to config.honeySlot
+-- -- an empty configured slot shouldn't mean "give up forever" if a
+-- full stack is sitting right there in a chest.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.lastHoneySlotUsed = nil
+
+  world.dronePos = { x = 0, z = 0 } -- seed honey at the storage position
+  apiary(DOWN)[1] = { name = "forestry:honey_drop", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false) -- unanalyzed
+  -- honeySlot (20) is configured but genuinely empty -- nothing there.
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local analyzed = M.analyzeWorkingSlots(config)
+  check("analyzeWorkingSlots restocked honey from storage and analyzed successfully",
+    analyzed == 1, "analyzed=" .. tostring(analyzed))
+  check("the fetched honey landed in a free working slot (2), not honeySlot",
+    world.agentInventory[2] ~= nil and world.agentInventory[2].name == "forestry:honey_drop")
+  check("analyzeWorkingSlots used the RESTOCKED honey slot, not the empty configured one",
+    world.lastHoneySlotUsed == 2, "used=" .. tostring(world.lastHoneySlotUsed))
+end
+
+do
+  -- No storagePos known either -- restock isn't even attempted, falls
+  -- straight through to config.honeySlot as before.
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.lastHoneySlotUsed = nil
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+
+  local config = { workingSlots = { 1 }, honeySlot = 20 }
+  local restocked = M.restockHoney(config)
+  check("restockHoney does nothing when no storage location is known", restocked == false)
 end
 
 -- ============================================================

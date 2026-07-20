@@ -11,9 +11,15 @@
 --]]
 
 return {
-  -- Slot holding honey/honeydew stock for beekeeper.analyze(). Restock
-  -- this manually for now.
+  -- Slot holding honey/honeydew stock for beekeeper.analyze(). Absolute
+  -- last resort only -- M.analyzeWorkingSlots searches cargo for honey
+  -- by item name first, and if cargo genuinely has none, automatically
+  -- flies to honeyStoragePos (or storagePos, below) and fetches more.
   honeySlot = 1,
+
+  -- Optional: a separate location to fetch honey from if you keep it
+  -- apart from general storage. Leave nil to just reuse storagePos.
+  honeyStoragePos = nil,
 
   -- Slots used as the live candidate-bee pool (the agent's own cargo).
   -- Leave nil -- M.resolveWorkingSlots auto-derives this as "every slot
