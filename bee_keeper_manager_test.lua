@@ -499,6 +499,53 @@ do
     site.progress == 1.0, "progress=" .. tostring(site.progress))
 end
 
+-- ============================================================
+-- Test: when a queen's FINAL work tick completes breeding (getBeeProgress
+-- consumes her, same as real Forestry/the local simulator), runQualitySite
+-- must fall through into seed+evaluate+load in this SAME visit instead of
+-- returning "working (100%)" and leaving the apiary idle for a whole
+-- extra cycle before ever re-seeding -- exactly what real-hardware/sim
+-- observation flagged: the robot harvested, then left without
+-- re-breeding, even with a candidate princess+drone sitting right there
+-- in cargo.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local pActive, pInactive = makeAlleles(traitList, {})
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true) -- old queen, about to be consumed
+  apiary(DOWN)._working = true
+  apiary(DOWN)._progress = 100
+
+  world.agentInventory[4] = mockBeeStack(pActive, pInactive, true) -- drone candidate
+  world.agentInventory[5] = mockPrincessStack(pActive, pInactive, true) -- next princess, ready and waiting
+
+  -- getBeeProgress's real effect (see bee_keeper_sim.lua's version):
+  -- consuming the queen on her final tick -- the mock component's
+  -- default getBeeProgress is just a static read with no side effects,
+  -- so this test overrides it to actually model that consumption.
+  local origGetBeeProgress = mockComponent.beekeeper.getBeeProgress
+  mockComponent.beekeeper.getBeeProgress = function(side)
+    apiary(side)[1] = nil
+    return 100
+  end
+
+  local config = { workingSlots = { 4, 5 }, minCopies = 2 }
+  local site = { name = "just-finished-breeding-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  mockComponent.beekeeper.getBeeProgress = origGetBeeProgress
+
+  check("runQualitySite re-seeds in the SAME visit breeding completes, not just 'working (100%)'",
+    status:match("^seeded princess") ~= nil, status)
+  check("the apiary's princess slot has a fresh queen, not left empty", apiary(DOWN)[1] ~= nil)
+  check("the apiary's drone slot got loaded too", apiary(DOWN)[2] ~= nil)
+end
+
 do
   world.apiaries = {}
   world.agentInventory = {}

@@ -324,7 +324,20 @@ function M.runQualitySite(config, site)
   local targetSpecies = site.targetSpecies
 
   if beekeeper().canWork(down) then
-    return string.format("working (%.0f%%)", beekeeper().getBeeProgress(down))
+    local progress = beekeeper().getBeeProgress(down)
+    -- getBeeProgress is what actually COMPLETES breeding on its final
+    -- tick (consumes the queen, creates her offspring/output) -- if
+    -- she's still there afterward, this visit's work genuinely isn't
+    -- done yet, so report progress and leave. But if she's now GONE,
+    -- breeding just finished on THIS call, and the apiary would
+    -- otherwise sit idle for a whole extra cycle (robot leaves, has to
+    -- come all the way back) before the seed+evaluate+load logic below
+    -- ever runs again -- so fall through into it in this SAME visit
+    -- instead, same principle as the earlier fix that stopped a
+    -- princess being seeded without a drone loaded in the same visit.
+    if M.readSideSlot(down, 1) ~= nil then
+      return string.format("working (%.0f%%)", progress)
+    end
   end
 
   local princessIndividual = M.readSideSlot(down, 1)
@@ -547,7 +560,15 @@ function M.runMutationSite(config, site)
 
   local down = sides().down
   if beekeeper().canWork(down) then
-    return string.format("attempting (%.0f%%)", beekeeper().getBeeProgress(down))
+    local progress = beekeeper().getBeeProgress(down)
+    -- Same reasoning as runQualitySite's identical check: getBeeProgress
+    -- completes the attempt on its final tick (consumes the queen) --
+    -- if she's gone now, fall through into planning/loading the next
+    -- attempt in this SAME visit instead of leaving the site idle for a
+    -- whole extra cycle.
+    if M.readSideSlot(down, 1) ~= nil then
+      return string.format("attempting (%.0f%%)", progress)
+    end
   end
 
   -- Same last-known purity cache as runQualitySite (see the note there).
