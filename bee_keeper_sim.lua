@@ -934,40 +934,47 @@ end
 -- bee_keeper_manager.lua, which can only ever see whatever's directly
 -- below it). Meant to be called from bee_keeper_local_sim_run.lua's
 -- "verbose" flag.
-function M.dumpWorld()
+--
+-- sink defaults to print (console/log use), but accepts any
+-- function(line) -- bee_keeper_local_sim_run.lua's "ui" mode passes one
+-- that writes each line to an absolute gpu position instead, so verbose
+-- output can be part of the live dashboard, not separate scrolling text
+-- that would corrupt its fixed-position redraws.
+function M.dumpWorld(sink)
+  sink = sink or print
   local world = M.world
   if not world then return end
 
-  print(string.format("  --- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
+  sink(string.format("--- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
     world.drone.x, world.drone.z, world.drone.facing, (world.drone.energy or 0) * 100,
     tostring(world.drone._selected)))
 
-  print("  --- cargo ---")
+  sink("--- cargo ---")
   local cargoSlots = sortedKeys(world.drone.inventory)
-  if #cargoSlots == 0 then print("    (empty)") end
+  if #cargoSlots == 0 then sink("  (empty)") end
   for _, slot in ipairs(cargoSlots) do
-    print(string.format("    slot %d: %s", slot, formatStack(world.drone.inventory[slot], true)))
+    sink(string.format("  slot %d: %s", slot, formatStack(world.drone.inventory[slot], true)))
   end
 
-  print("  --- storage ---")
+  sink("--- storage ---")
   local storageSlots = sortedKeys(world.storage)
-  if #storageSlots == 0 then print("    (empty)") end
+  if #storageSlots == 0 then sink("  (empty)") end
   for _, slot in ipairs(storageSlots) do
-    print(string.format("    slot %d: %s", slot, formatStack(world.storage[slot], true)))
+    sink(string.format("  slot %d: %s", slot, formatStack(world.storage[slot], true)))
   end
 
-  print("  --- apiaries ---")
+  sink("--- apiaries ---")
   for _, key in ipairs(sortedKeys(world.apiaries)) do
     local a = world.apiaries[key]
-    print(string.format("    apiary @ (%s) -- work %d/%d:", key, a.workTicks, a.workNeeded))
-    print("      slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess"), true) or "empty"))
-    print("      slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone"), true) or "empty"))
+    sink(string.format("  apiary @ (%s) -- work %d/%d:", key, a.workTicks, a.workNeeded))
+    sink("    slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess"), true) or "empty"))
+    sink("    slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone"), true) or "empty"))
     local productSlots = sortedKeys(a.products or {})
     if #productSlots == 0 then
-      print("      outputs (6-12): (empty)")
+      sink("    outputs (6-12): (empty)")
     else
       for _, slot in ipairs(productSlots) do
-        print(string.format("      slot %d (output): %s", slot, formatStack(a.products[slot])))
+        sink(string.format("    slot %d (output): %s", slot, formatStack(a.products[slot])))
       end
     end
   end

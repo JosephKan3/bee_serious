@@ -133,20 +133,28 @@ local function listSimStorage()
   return list
 end
 
--- Delegates to Sim.dumpWorld() -- agent status, cargo, storage, AND
--- every apiary's queen/drone/output slots, read directly off world
--- state (formatting logic lives in bee_keeper_sim.lua since it already
--- owns the raw-genotype<->stack conversion internals this needs).
-local function dumpVerbose()
-  Sim.dumpWorld()
-end
-
 if uiEnabled then
   local UI = require("bee_keeper_ui")
+  local gpu = require("component").gpu
+  local _termW, termH = Sim.resolveTermSize(gridWidth, gridHeight)
   local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos, trashPos = config.trashPos }
+
   local function draw()
     UI.draw(config.sites, Nav.getPos(), extras, Status.get(), Sim.world.drone.energy,
       M.listCargo(config), listSimStorage())
+    -- Built into the SAME redraw as the dashboard above, right below its
+    -- last row -- not separate scrolling print() text, which would
+    -- corrupt the dashboard's fixed-position writes. Updates on every
+    -- refresh (every Status.onChange AND every Nav.onStep block-move),
+    -- same cadence as the dashboard itself, not just once per cycle.
+    if verboseEnabled then
+      local row = termH + 2
+      gpu.setForeground(0xE0E0E0)
+      Sim.dumpWorld(function(line)
+        gpu.set(1, row, line)
+        row = row + 1
+      end)
+    end
   end
   Status.onChange = function()
     draw()
@@ -181,10 +189,13 @@ for cycle = 1, cycles do
     for _, line in ipairs(log) do
       print(line)
     end
-  end
-  if verboseEnabled then
-    print(string.format("  [verbose] after cycle %d:", cycle))
-    dumpVerbose()
+    -- In ui mode, verbose is already part of every redraw (see draw()
+    -- above) -- printing it again here too would just scroll separately
+    -- underneath the dashboard.
+    if verboseEnabled then
+      print(string.format("  [verbose] after cycle %d:", cycle))
+      Sim.dumpWorld()
+    end
   end
 end
 
