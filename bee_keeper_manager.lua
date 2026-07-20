@@ -445,7 +445,7 @@ function M.harvestSite(config, site, productSlots)
   for _, productSlot in ipairs(productSlots) do
     for _, workingSlot in ipairs(config.workingSlots) do
       if M.readOwnSlot(workingSlot) == nil then
-        local moved = invCtrl().suckFromSlot(down, productSlot, 1, nil)
+        local moved = invCtrl().suckFromSlot(down, productSlot, 1)
         if moved and moved > 0 then harvested = harvested + 1 end
         break
       end
