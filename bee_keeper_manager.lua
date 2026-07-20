@@ -308,8 +308,12 @@ function M.runQualitySite(config, site)
   end
 
   -- Discard drones the plan doesn't want, to make room. Default behavior:
-  -- fly them to config.storagePos and drop them there (see M.dumpToStorage)
-  -- -- override config.onDiscard to route elsewhere (sampler/furnace/junk).
+  -- fly them to config.trashPos (permanently voided -- see M.dumpToTrash)
+  -- if known, else config.storagePos (see M.dumpToStorage) -- trash is
+  -- preferred when both are known, since a breeding program generates a
+  -- steady stream of unwanted drones that would otherwise slowly fill up
+  -- a finite storage chest. Override config.onDiscard to route elsewhere
+  -- entirely (sampler/furnace/junk).
   local discardCount = 0
   for _, entry in ipairs(plan.toDiscard) do
     if entry.drone.id ~= plan.breedWith.id then
@@ -319,14 +323,18 @@ function M.runQualitySite(config, site)
       end
     end
   end
-  if discardCount > 0 and not config.onDiscard and config.storagePos then
-    M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
-    -- dumpToStorage flew away to drop off discards -- come back before
-    -- finishing the swap below, or it lands on the storage chest instead
-    -- of the apiary (caught by the local simulator: swapDrone would fail
-    -- there since there's no apiary at the storage position).
+  if discardCount > 0 and not config.onDiscard and (config.trashPos or config.storagePos) then
+    if config.trashPos then
+      M.dumpToTrash(config, plan.toDiscard, plan.breedWith.id)
+    else
+      M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
+    end
+    -- flew away to drop off discards -- come back before finishing the
+    -- swap below, or it lands on the storage/trash position instead of
+    -- the apiary (caught by the local simulator: swapDrone would fail
+    -- there since there's no apiary at that position).
     local backOk, backReason = gotoSite(site)
-    if not backOk then return "nav_failed_returning_from_storage:" .. tostring(backReason) end
+    if not backOk then return "nav_failed_returning_from_discard:" .. tostring(backReason) end
   end
 
   Status.setStep("Loading drone into " .. (site.name or "?"))
@@ -559,15 +567,18 @@ function M.harvestSite(config, site, productSlots)
 end
 
 -- ============================================================
--- Storage: fly discarded drones to config.storagePos and drop them in a
--- plain chest (MVP -- see bee_keeper_manager_config.lua). Default discard
--- destination when config.onDiscard isn't set.
+-- Storage/trash: fly discarded drones to a position and drop them into the
+-- first empty slot found there. Shared by M.dumpToStorage (a plain chest,
+-- kept for later) and M.dumpToTrash (e.g. Extra Utilities' Trash Can,
+-- permanently voided) -- same mechanic, different destination. Default
+-- discard destination when config.onDiscard isn't set (see
+-- M.runQualitySite's discard block for the trash-preferred-over-storage
+-- ordering).
 -- ============================================================
 
-function M.dumpToStorage(config, discardEntries, keepId)
-  if not config.storagePos then return 0 end
-  Status.setStep("Flying discards to storage")
-  local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
+local function dumpEntriesAt(pos, slotCount, discardEntries, keepId)
+  if not pos then return 0 end
+  local ok = Nav.gotoXZ(pos.x, pos.z)
   if not ok then return 0 end
 
   local down = sides().down
@@ -575,9 +586,9 @@ function M.dumpToStorage(config, discardEntries, keepId)
   for _, entry in ipairs(discardEntries) do
     if entry.drone.id ~= keepId and entry.drone._slot then
       agent().select(entry.drone._slot)
-      for storageSlot = 1, (config.storageSlotCount or 54) do
-        if invCtrl().getStackInSlot(down, storageSlot) == nil then
-          if invCtrl().dropIntoSlot(down, storageSlot) then
+      for slot = 1, (slotCount or 54) do
+        if invCtrl().getStackInSlot(down, slot) == nil then
+          if invCtrl().dropIntoSlot(down, slot) then
             dropped = dropped + 1
           end
           break
@@ -586,6 +597,16 @@ function M.dumpToStorage(config, discardEntries, keepId)
     end
   end
   return dropped
+end
+
+function M.dumpToStorage(config, discardEntries, keepId)
+  Status.setStep("Flying discards to storage")
+  return dumpEntriesAt(config.storagePos, config.storageSlotCount, discardEntries, keepId)
+end
+
+function M.dumpToTrash(config, discardEntries, keepId)
+  Status.setStep("Flying discards to trash")
+  return dumpEntriesAt(config.trashPos, config.trashSlotCount or 1, discardEntries, keepId)
 end
 
 -- ============================================================

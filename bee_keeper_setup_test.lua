@@ -62,16 +62,19 @@ do
     ["3:2"] = "forestry:apiary",
     ["0:4"] = "minecraft:chest",
     ["2:2"] = "minecraft:dirt", -- irrelevant
+    ["4:0"] = "extrautilities:trashcan",
   }
 
   local config = {
     apiaryBlockNames = { "forestry:apiary" },
     storageBlockNames = { "minecraft:chest" },
+    trashBlockNames = { "extrautilities:trashcan" },
   }
 
   local result = Setup.scanArea(config, 5, 5)
   check("scanArea finds both apiaries", #result.apiarySites == 2, "found=" .. #result.apiarySites)
   check("scanArea finds the storage container", #result.storageSites == 1, "found=" .. #result.storageSites)
+  check("scanArea finds the trash can", #result.trashSites == 1, "found=" .. #result.trashSites)
 
   local foundApiaryAt = {}
   for _, s in ipairs(result.apiarySites) do foundApiaryAt[s.x .. ":" .. s.z] = true end
@@ -79,6 +82,10 @@ do
 
   check("scanArea records the correct storage position",
     result.storageSites[1].x == 0 and result.storageSites[1].z == 4)
+  check("scanArea records the correct trash position",
+    result.trashSites[1].x == 4 and result.trashSites[1].z == 0)
+  check("trash and storage are classified separately, not lumped together",
+    result.storageSites[1].x ~= result.trashSites[1].x or result.storageSites[1].z ~= result.trashSites[1].z)
 end
 
 -- ============================================================

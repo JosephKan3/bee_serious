@@ -107,11 +107,12 @@ local function main(args)
 
   config.sites = M.loadSites(saved.sites, config.siteOverrides)
   config.storagePos = config.storagePos or saved.storagePos
+  config.trashPos = config.trashPos or saved.trashPos
 
   if uiEnabled then
     local UI = require("bee_keeper_ui")
     local computer = require("computer")
-    local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos }
+    local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos, trashPos = config.trashPos }
 
     -- Redraw on every status change, not just once per cycle -- since
     -- Status.setStep is already called at every meaningful action boundary

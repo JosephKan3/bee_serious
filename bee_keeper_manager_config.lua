@@ -35,24 +35,35 @@ return {
   minCopies = 2,
 
   -- Optional: what to do with a drone the algorithm doesn't want to keep.
-  -- If left nil AND storagePos is set (see below), discarded drones are
-  -- automatically flown to storage and dropped (M.dumpToStorage). Set this
-  -- to a function(bee) to route them elsewhere instead (sampler/furnace).
+  -- If left nil, discarded drones are automatically flown to trashPos (if
+  -- set) or storagePos otherwise, and dropped there (see M.dumpToTrash /
+  -- M.dumpToStorage) -- trash is preferred when both are known, since a
+  -- breeding program generates a steady stream of unwanted drones that
+  -- would otherwise slowly fill up a finite storage chest. Set this to a
+  -- function(bee) to route them elsewhere instead (sampler/furnace).
   onDiscard = nil,
 
   -- How many slots to try in the storage container before giving up on a
   -- discard. Confirmed 27 via getInventorySize() -- a single chest.
   storageSlotCount = 27,
 
+  -- Trash cans (e.g. Extra Utilities' Trash Can) typically expose a
+  -- single always-empty inventory slot -- anything dropped in is voided
+  -- immediately.
+  trashSlotCount = 1,
+
   -- Block names the area scan (bee_keeper_setup.lua) treats as "this is an
-  -- apiary" / "this is the storage container", matched against
-  -- geolyzer.analyze(sides.down).name. "Forestry:apiculture" confirmed via
-  -- probeBlockBelow() against a real apiary -- note the capital F, and
-  -- "apiculture" not "apiary" (both wrong in the earlier guess). If you
-  -- also use an Alveary or Industrial Apiary, probe one of those too --
-  -- no reason to assume they report the same name. Add any storage
-  -- container's real block name here the same way -- "etfuturum:barrel"
-  -- was added after the scan failed to recognize a barrel as storage.
+  -- apiary" / "this is the storage container" / "this is the trash can",
+  -- matched against geolyzer.analyze(sides.down).name. "Forestry:apiculture"
+  -- confirmed via probeBlockBelow() against a real apiary -- note the
+  -- capital F, and "apiculture" not "apiary" (both wrong in the earlier
+  -- guess). If you also use an Alveary or Industrial Apiary, probe one of
+  -- those too -- no reason to assume they report the same name. Add any
+  -- storage container's real block name here the same way --
+  -- "etfuturum:barrel" was added after the scan failed to recognize a
+  -- barrel as storage. "ExtraUtilities:trashcan" is an UNCONFIRMED GUESS
+  -- for Extra Utilities' Trash Can -- verify with probeBlockBelow() the
+  -- same way before relying on it.
   apiaryBlockNames = {
     "Forestry:apiculture",
   },
@@ -60,6 +71,9 @@ return {
     "minecraft:chest",
     "minecraft:trapped_chest",
     "etfuturum:barrel",
+  },
+  trashBlockNames = {
+    "ExtraUtilities:trashcan",
   },
 
   -- Whether bee_keeper_setup.lua flies the 4 corners (with a light flash)
@@ -92,9 +106,10 @@ return {
     -- ["site2"] = { mode = "mutation", targetSpecies = "SomeNewSpecies" },
   },
 
-  -- storagePos gets filled in by bee_keeper_setup.lua's scan automatically
-  -- (see bee_keeper_manager_run.lua) -- leave nil here.
+  -- storagePos/trashPos get filled in by bee_keeper_setup.lua's scan
+  -- automatically (see bee_keeper_manager_run.lua) -- leave nil here.
   storagePos = nil,
+  trashPos = nil,
 
   -- sites gets filled in by bee_keeper_manager_run.lua from the persisted
   -- scan + siteOverrides above (see M.loadSites) -- leave nil here.

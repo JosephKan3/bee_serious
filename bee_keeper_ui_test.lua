@@ -54,7 +54,7 @@ do
     { name = "site3", x = 10, z = 10, mode = "mutation" },
   }
   local dronePos = { x = 5, z = 5 }
-  local extras = { chargerPos = { x = -2, z = -2 }, storagePos = { x = 12, z = 12 } }
+  local extras = { chargerPos = { x = -2, z = -2 }, storagePos = { x = 12, z = 12 }, trashPos = { x = -5, z = 12 } }
   local status = { step = "Flying to (10,10)", history = { "a", "b", "c" } }
 
   local rows, placements = UI.renderBuffer(sites, dronePos, extras, status, 0.75, 40, 16)
@@ -69,6 +69,7 @@ do
   check("map contains a species symbol", joined:find("S", 1, true) ~= nil)
   check("map contains a mutation symbol", joined:find("M", 1, true) ~= nil)
   check("map contains the storage symbol", joined:find("%$") ~= nil)
+  check("map contains the trash symbol", joined:find("X", 1, true) ~= nil)
   check("map contains the charger symbol", joined:find("C", 1, true) ~= nil)
   check("map contains the drone symbol", joined:find("@", 1, true) ~= nil)
 
@@ -93,12 +94,15 @@ do
   end
   check("all 3 sites are colored as plain apiaries, not per-mode", apiaryCount == 3, "apiaryCount=" .. apiaryCount)
   check("placements include storage", byKey.storage ~= nil)
+  check("placements include trash", byKey.trash ~= nil)
   check("placements include charger", byKey.charger ~= nil)
   check("placements include the drone", byKey.drone ~= nil)
 
-  check("drone, apiary, storage, and charger each have a distinct color",
+  check("drone, apiary, storage, trash, and charger each have a distinct color",
     UI.COLORS.drone ~= UI.COLORS.apiary and UI.COLORS.apiary ~= UI.COLORS.storage
-    and UI.COLORS.storage ~= UI.COLORS.charger and UI.COLORS.charger ~= UI.COLORS.drone)
+    and UI.COLORS.storage ~= UI.COLORS.charger and UI.COLORS.charger ~= UI.COLORS.drone
+    and UI.COLORS.trash ~= UI.COLORS.drone and UI.COLORS.trash ~= UI.COLORS.apiary
+    and UI.COLORS.trash ~= UI.COLORS.storage and UI.COLORS.trash ~= UI.COLORS.charger)
 
   -- Each placement's (row,col) must actually match where that symbol
   -- landed in the text grid -- otherwise M.draw would color the wrong cell.

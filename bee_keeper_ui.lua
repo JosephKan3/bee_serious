@@ -23,6 +23,7 @@ M.SYMBOLS = {
   species = "S",
   mutation = "M",
   storage = "$",
+  trash = "X",
   charger = "C",
   drone = "@",
 }
@@ -32,13 +33,13 @@ M.SYMBOLS = {
 -- change needed for that -- the GPU driver itself handles it); real color
 -- needs Tier 2+. Apiaries are ALL one color regardless of mode (traitmax/
 -- species/mutation still get different SYMBOLS so you can tell them apart
--- by character, just not by color) -- per your call, only 3 things need
--- distinct colors: the drone, apiaries, and storage.
+-- by character, just not by color).
 M.COLORS = {
   apiary = 0xE0C000, -- yellow, ALL apiaries regardless of mode
   storage = 0x00CFCF, -- cyan
-  -- charger = 0xE0A000, -- amber (distinct from the 3 you named)
-  charger = 0x00E000, -- light green (distinct from the 3 you named)
+  trash = 0xFF00FF, -- magenta
+  -- charger = 0xE0A000, -- amber (distinct from the others)
+  charger = 0x00E000, -- light green (distinct from the others)
   drone = 0xE03030, -- red
   default = 0x707070, -- dim grey for the map's empty "." cells
   text = 0xE0E0E0, -- header/footer/panel text
@@ -138,6 +139,7 @@ function M.renderBuffer(sites, dronePos, extras, statusInfo, chargePercent, widt
   for _, s in ipairs(sites) do table.insert(points, { x = s.x, z = s.z }) end
   if extras.chargerPos then table.insert(points, extras.chargerPos) end
   if extras.storagePos then table.insert(points, extras.storagePos) end
+  if extras.trashPos then table.insert(points, extras.trashPos) end
 
   local minX, maxX, minZ, maxZ = boundingBox(points)
 
@@ -169,6 +171,7 @@ function M.renderBuffer(sites, dronePos, extras, statusInfo, chargePercent, widt
   end
 
   if extras.storagePos then place(extras.storagePos.x, extras.storagePos.z, M.SYMBOLS.storage, "storage") end
+  if extras.trashPos then place(extras.trashPos.x, extras.trashPos.z, M.SYMBOLS.trash, "trash") end
   if extras.chargerPos then place(extras.chargerPos.x, extras.chargerPos.z, M.SYMBOLS.charger, "charger") end
   for _, s in ipairs(sites) do
     place(s.x, s.z, M.SYMBOLS[s.mode] or "?", "apiary")

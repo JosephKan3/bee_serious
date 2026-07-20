@@ -55,9 +55,10 @@ M.SITES_FILE = "bee_keeper_sites.dat"
 -- ============================================================
 
 -- names: array of exact-match block name strings (see header notes on
--- these being unconfirmed defaults).
+-- these being unconfirmed defaults), or nil if that category isn't
+-- configured at all (e.g. an older config without trashBlockNames).
 local function matchesAny(blockName, names)
-  if not blockName then return false end
+  if not blockName or not names then return false end
   for _, n in ipairs(names) do
     if blockName == n then return true end
   end
@@ -217,12 +218,13 @@ local function sweepCells(width, depth)
 end
 
 -- Sweeps the whole area, classifying the block below at each cell.
--- Returns { apiarySites = {{x,z},...}, storageSites = {{x,z},...} }.
+-- Returns { apiarySites = {{x,z},...}, storageSites = {{x,z},...},
+-- trashSites = {{x,z},...} }.
 function M.scanArea(config, width, depth)
   local geolyzer = component().geolyzer
   local downSide = sides().down
 
-  local apiarySites, storageSites = {}, {}
+  local apiarySites, storageSites, trashSites = {}, {}, {}
   local cells = sweepCells(width, depth)
 
   for i, cell in ipairs(cells) do
@@ -232,6 +234,8 @@ function M.scanArea(config, width, depth)
       local blockName = result and result.name
       if matchesAny(blockName, config.apiaryBlockNames) then
         table.insert(apiarySites, { x = cell[1], z = cell[2] })
+      elseif matchesAny(blockName, config.trashBlockNames) then
+        table.insert(trashSites, { x = cell[1], z = cell[2] })
       elseif matchesAny(blockName, config.storageBlockNames) then
         table.insert(storageSites, { x = cell[1], z = cell[2] })
       end
@@ -240,27 +244,27 @@ function M.scanArea(config, width, depth)
     end
 
     if i % 10 == 0 then
-      print(string.format("Scanned %d/%d cells -- %d apiaries, %d storage candidates so far",
-        i, #cells, #apiarySites, #storageSites))
+      print(string.format("Scanned %d/%d cells -- %d apiaries, %d storage candidates, %d trash candidates so far",
+        i, #cells, #apiarySites, #storageSites, #trashSites))
     end
   end
 
-  return { apiarySites = apiarySites, storageSites = storageSites }
+  return { apiarySites = apiarySites, storageSites = storageSites, trashSites = trashSites }
 end
 
 -- ============================================================
 -- Main entry point
 -- ============================================================
 
--- config: needs apiaryBlockNames, storageBlockNames (see header notes).
--- Returns the saved-sites table ({ sites = {...}, storagePos = {...} or
--- nil, width=.., depth=.. }), or nil if the user skipped setup with no
--- existing file to fall back on.
+-- config: needs apiaryBlockNames, storageBlockNames, trashBlockNames (see
+-- header notes). Returns the saved-sites table ({ sites = {...},
+-- storagePos = {...} or nil, trashPos = {...} or nil, width=.., depth=.. }),
+-- or nil if the user skipped setup with no existing file to fall back on.
 function M.run(config)
   local existing = loadFile(M.SITES_FILE)
   if existing then
-    print(string.format("Found existing site config (%d apiaries, storage %s). Press Enter to keep it, or type 'rescan' to redo:",
-      #existing.sites, existing.storagePos and "found" or "not found"))
+    print(string.format("Found existing site config (%d apiaries, storage %s, trash %s). Press Enter to keep it, or type 'rescan' to redo:",
+      #existing.sites, existing.storagePos and "found" or "not found", existing.trashPos and "found" or "not found"))
     local line = io.read()
     if line ~= "rescan" then
       return existing
@@ -304,10 +308,17 @@ function M.run(config)
       #result.storageSites, storagePos.x, storagePos.z, M.SITES_FILE))
   end
 
-  local saved = { sites = sites, storagePos = storagePos, width = width, depth = depth }
+  local trashPos = result.trashSites[1]
+  if #result.trashSites > 1 then
+    print(string.format("Found %d trash can candidates, using the first at (%d,%d). Edit %s to change.",
+      #result.trashSites, trashPos.x, trashPos.z, M.SITES_FILE))
+  end
+
+  local saved = { sites = sites, storagePos = storagePos, trashPos = trashPos, width = width, depth = depth }
   saveFile(M.SITES_FILE, saved)
-  print(string.format("Saved %d apiary sites%s to %s.", #sites,
-    storagePos and " and 1 storage location" or " (no storage container found)", M.SITES_FILE))
+  print(string.format("Saved %d apiary sites%s%s to %s.", #sites,
+    storagePos and " and 1 storage location" or " (no storage container found)",
+    trashPos and " and 1 trash can" or " (no trash can found)", M.SITES_FILE))
   print("Every discovered site defaults to traitmax mode -- edit " .. M.SITES_FILE ..
     " (or bee_keeper_manager_config.lua's siteOverrides) to assign species/mutation targets.")
 

@@ -500,6 +500,69 @@ do
 end
 
 -- ============================================================
+-- Test: dumpToTrash flies to trashPos and drops discarded drones there
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+  world.agentInventory[10] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+
+  local config = { trashPos = { x = -3, z = -3 }, trashSlotCount = 1 }
+  local discardEntries = { { drone = { id = "a", _slot = 10 } } }
+
+  local dropped = M.dumpToTrash(config, discardEntries, "keep-me")
+  check("dumpToTrash drops the discarded drone", dropped == 1, "dropped=" .. tostring(dropped))
+  check("dumpToTrash flew to trashPos", world.dronePos.x == -3 and world.dronePos.z == -3)
+  check("dumpToTrash actually placed the item at the trash position", apiary(DOWN)[1] ~= nil)
+end
+
+-- ============================================================
+-- Test: runQualitySite prefers trash over storage for discards when both
+-- are known -- a breeding program generates a steady stream of unwanted
+-- drones that would otherwise slowly fill up a finite storage chest.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local goodExceptFertility = {}
+  for _, t in ipairs(traitList) do goodExceptFertility[t] = Cfg.targets[t].target end
+  goodExceptFertility.fertility = 1
+  local pActive, pInactive = makeAlleles(traitList, goodExceptFertility)
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+
+  local strongTraits = { fertility = Cfg.targets.fertility.target }
+  local strongActive, strongInactive = makeAlleles(traitList, strongTraits)
+  world.agentInventory[6] = mockBeeStack(strongActive, strongInactive, true) -- picked
+
+  -- A genuinely worthless drone (lifespan overridden the same way as the
+  -- princess test above, so it's not coincidentally bankable) -- should
+  -- get discarded to whichever destination is preferred.
+  local weakActive, weakInactive = makeAlleles(traitList, { lifespan = 999 })
+  world.agentInventory[7] = mockBeeStack(weakActive, weakInactive, true)
+
+  local config = {
+    workingSlots = { 6, 7 }, minCopies = 2,
+    storagePos = { x = 0, z = 0 }, storageSlotCount = 10,
+    trashPos = { x = -10, z = -10 }, trashSlotCount = 1,
+  }
+  local site = { name = "test-site", x = 5, z = 9, mode = "traitmax" }
+
+  M.runQualitySite(config, site)
+
+  world.dronePos = { x = -10, z = -10 }
+  check("discard landed at trashPos, not storagePos", apiary(DOWN)[1] ~= nil, "trash slot 1 empty")
+
+  world.dronePos = { x = 0, z = 0 }
+  check("storagePos was never touched when trashPos is also known", apiary(DOWN)[1] == nil)
+end
+
+-- ============================================================
 -- Test: loadSites merges persisted (x,z) with mode/targetSpecies overrides
 -- ============================================================
 
