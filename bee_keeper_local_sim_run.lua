@@ -8,9 +8,20 @@
   Minecraft required.
 
   Usage:
-    lua bee_keeper_local_sim_run.lua [ui] [verbose] [paused] [cycles] [mode] [targetSpecies] [WxH]
+    lua bee_keeper_local_sim_run.lua [ui] [verbose] [paused] [hard] [cycles] [mode] [targetSpecies] [WxH]
 
   ui            show the live dashboard (same as the real run script's "ui")
+  hard          only for traitmax's general population -- normally cargo
+                starts with an instant-good (fully purebred) drone and
+                princess ready to go, so a traitmax site can max out in
+                a couple of cycles. "hard" instead scatters good alleles
+                across three DIFFERENT starting drones (each covering
+                only a third of the tracked traits) -- every trait's
+                good allele genuinely exists somewhere in the starting
+                population (so purebred stays reachable), but only by
+                actually combining those separate lineages via several
+                real generations of breeding, not by getting lucky with
+                an instant-good bee on cycle 1.
   verbose       after every cycle, dump EVERYTHING in the simulated
                 world: the agent's own status (position/facing/energy/
                 selected slot), every occupied cargo slot, every occupied
@@ -66,6 +77,7 @@ local args = { ... }
 local uiEnabled = false
 local verboseEnabled = false
 local startPaused = false
+local hardMode = false
 local cycles = 20
 local mode = "traitmax"
 local targetSpecies = nil
@@ -80,6 +92,8 @@ for _, a in ipairs(args) do
     verboseEnabled = true
   elseif a == "paused" then
     startPaused = true
+  elseif a == "hard" then
+    hardMode = true
   elseif w then
     gridWidth, gridHeight = tonumber(w), tonumber(h)
   elseif MODES[a] then
@@ -130,7 +144,7 @@ config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1
 
 -- Must install the fakes BEFORE anything requires component/sides/computer
 -- for the first time (require caches on first load).
-Sim.install(config, config.sites, { uiWidth = gridWidth, uiHeight = gridHeight })
+Sim.install(config, config.sites, { uiWidth = gridWidth, uiHeight = gridHeight, hard = hardMode })
 
 local M = require("bee_keeper_manager")
 local Nav = require("bee_keeper_nav")

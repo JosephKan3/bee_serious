@@ -12,11 +12,17 @@
   mode is for).
 
   Usage:
-    lua bee_keeper_fast_debug.lua [cycles] [mode] [targetSpecies]
+    lua bee_keeper_fast_debug.lua [cycles] [mode] [targetSpecies] [hard]
 
   cycles         how many cycles to run (default 40)
   mode           traitmax (default), species, or mutation
   targetSpecies  only meaningful for species/mutation modes
+  hard           only for traitmax's general population -- scatters
+                 good alleles across three DIFFERENT starting drones
+                 instead of handing over an instant-good one (see
+                 bee_keeper_sim.lua's newWorld opts.hard); purebred
+                 stays reachable but now genuinely takes several real
+                 generations of combining separate lineages together
 
   Prints one line per cycle (the same [mode] site: status log runCycle
   already returns) plus, after every cycle, a warning for any apiary
@@ -31,8 +37,12 @@ local args = { ... }
 local cycles = tonumber(args[1]) or 40
 local mode = args[2] or "traitmax"
 local targetSpecies = args[3]
+local hardMode = false
 local MODES = { traitmax = true, species = true, mutation = true }
 if not MODES[mode] then mode = "traitmax" end
+for _, a in ipairs(args) do
+  if a == "hard" then hardMode = true end
+end
 if mode == "species" then targetSpecies = targetSpecies or "Sticky"
 elseif mode == "mutation" then targetSpecies = targetSpecies or "NewBee" end
 
@@ -53,7 +63,7 @@ config.trashPos = config.trashPos or { x = -8, z = -8 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
 config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 
-Sim.install(config, config.sites, {})
+Sim.install(config, config.sites, { hard = hardMode })
 
 local M = require("bee_keeper_manager")
 local Nav = require("bee_keeper_nav")
