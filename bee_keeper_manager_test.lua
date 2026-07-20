@@ -244,6 +244,54 @@ do
 end
 
 -- ============================================================
+-- Test: a princess sitting in cargo must never be treated as a
+-- discardable drone candidate -- the real-hardware bug where a harvested
+-- princess got flown to storage instead of staying available to re-seed
+-- her own apiary (gatherCandidateDrones didn't distinguish item types).
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local goodExceptFertility = {}
+  for _, t in ipairs(traitList) do goodExceptFertility[t] = Cfg.targets[t].target end
+  goodExceptFertility.fertility = 1
+
+  local pActive, pInactive = makeAlleles(traitList, goodExceptFertility)
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+
+  local strongTraits = {}
+  strongTraits.fertility = Cfg.targets.fertility.target
+  local strongActive, strongInactive = makeAlleles(traitList, strongTraits)
+  world.agentInventory[6] = mockBeeStack(strongActive, strongInactive, true) -- the drone that'll be picked
+
+  -- A harvested princess sitting in cargo, deliberately with NOTHING
+  -- valuable in her genotype -- if she were ever scored as an ordinary
+  -- drone candidate, she'd have no reason to be banked (no good allele to
+  -- protect via minCopies) and would be a clear-cut discard. Distinguishable
+  -- from a real drone only by item name. lifespan is explicitly overridden
+  -- (not left at makeAlleles' default 0) since lifespan is an "atMost 10"
+  -- trait -- 0 would otherwise coincidentally satisfy it and make her
+  -- bankable, masking exactly the bug this test exists to catch.
+  local weakActive, weakInactive = makeAlleles(traitList, { lifespan = 999 })
+  world.agentInventory[7] = mockPrincessStack(weakActive, weakInactive, true)
+
+  local config = { workingSlots = { 6, 7 }, minCopies = 2, storagePos = { x = 0, z = 0 }, storageSlotCount = 10 }
+  local site = { name = "test-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite still loads the real drone", status:match("^loaded drone") ~= nil, status)
+  check("princess was never treated as a discard candidate (still in her own cargo slot)",
+    world.agentInventory[7] ~= nil and world.agentInventory[7].name == "Forestry:beePrincessGE")
+
+  world.dronePos = { x = 0, z = 0 } -- peek at storage regardless of where the code left the drone
+  check("princess never got flown to storage", apiary(DOWN)[1] == nil and apiary(DOWN)[2] == nil)
+end
+
+-- ============================================================
 -- Test: runQualitySite seeds a princess from cargo when the apiary's
 -- queen slot is empty -- this is the real-hardware bug where a spent
 -- queen is fully consumed by Forestry (not replaced in slot 1), leaving

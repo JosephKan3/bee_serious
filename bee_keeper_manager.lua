@@ -200,14 +200,31 @@ M.gotoSite = gotoSite
 -- whether targetSpecies is set)
 -- ============================================================
 
--- Gathers usable candidate drones from the working slots (analyzed bees
+-- Matched by item name, case-insensitively, since Forestry's own
+-- princess/queen items both qualify (a queen is just a mated princess).
+local function isPrincessOrQueenStack(stack)
+  if not stack or not stack.name then return false end
+  local lower = stack.name:lower()
+  return lower:find("princess") ~= nil or lower:find("queen") ~= nil
+end
+
+-- Gathers usable candidate DRONES from the working slots (analyzed bees
 -- only -- unanalyzed ones are queued for analysis instead, see
--- M.analyzeWorkingSlots).
+-- M.analyzeWorkingSlots). Explicitly excludes princess/queen items --
+-- without this, a harvested princess sitting in cargo (e.g. waiting to be
+-- re-seeded via M.runQualitySite's findPrincessCandidate below) gets
+-- scored and treated as an ordinary breeding drone by
+-- bee_breeding.planGeneration, and if she isn't picked as the "best
+-- drone" this cycle, ends up in plan.toDiscard and gets flown to
+-- storage/trash right along with actually-unwanted drones. This is
+-- exactly what real hardware hit: a princess got stored instead of
+-- staying available to re-seed her own apiary.
 local function gatherCandidateDrones(config, traitList, targetSpecies)
   local pool = {}
   for _, slot in ipairs(config.workingSlots) do
-    local individual = M.readOwnSlot(slot)
-    if individual then
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local individual = readIndividual(stack)
+    if individual and not isPrincessOrQueenStack(stack) then
       local bee = toBreedingBee("slot" .. slot, individual, traitList, targetSpecies)
       bee._slot = slot
       table.insert(pool, bee)
@@ -219,17 +236,12 @@ end
 -- Finds an analyzed princess/queen sitting in the agent's own cargo,
 -- for seeding an apiary whose queen slot has gone empty (see the
 -- no-princess branch in M.runQualitySite below for why this is needed at
--- all). Matched by item name, case-insensitively, since Forestry's own
--- princess/queen items both work here (a queen is just a mated
--- princess). Returns the working slot number, or nil if cargo has none.
+-- all). Returns the working slot number, or nil if cargo has none.
 local function findPrincessCandidate(config)
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
-    if stack and stack.name then
-      local lower = stack.name:lower()
-      if (lower:find("princess") or lower:find("queen")) and readIndividual(stack) then
-        return slot
-      end
+    if isPrincessOrQueenStack(stack) and readIndividual(stack) then
+      return slot
     end
   end
   return nil
