@@ -1,3 +1,3 @@
 return {
-  programVersion = "0.1.21"
+  programVersion = "0.1.22"
 }
