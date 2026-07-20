@@ -104,19 +104,32 @@ mockComponent.inventory_controller = {
   -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot/swapQueen/
   -- swapDrone below -- NOT an auto-picked empty slot. This is what caught
   -- M.harvestSite forgetting to select() before calling this on real
-  -- hardware: harvesting silently produced nothing.
+  -- hardware: harvesting silently produced nothing. If the destination is
+  -- already occupied, this models a real inventory's merge (increments
+  -- size) rather than refusing -- production code only ever selects an
+  -- occupied slot via findStackingSlot, which already verified it's a
+  -- genuine match.
   suckFromSlot = function(side, slot, count)
     local stack = apiary(side)[slot]
     if not stack then return 0 end
-    if world.agentInventory[world.selectedSlot] ~= nil then return 0 end
-    world.agentInventory[world.selectedSlot] = stack
+    local existing = world.agentInventory[world.selectedSlot]
+    if existing then
+      existing.size = (existing.size or 1) + 1
+    else
+      world.agentInventory[world.selectedSlot] = stack
+    end
     apiary(side)[slot] = nil
     return 1
   end,
   dropIntoSlot = function(side, slot)
     local stack = world.agentInventory[world.selectedSlot]
     if not stack then return false end
-    apiary(side)[slot] = stack
+    local existing = apiary(side)[slot]
+    if existing then
+      existing.size = (existing.size or 1) + 1
+    else
+      apiary(side)[slot] = stack
+    end
     world.agentInventory[world.selectedSlot] = nil
     return true
   end,
@@ -476,6 +489,34 @@ do
 end
 
 -- ============================================================
+-- Test: harvestSite merges a harvested item into an existing matching
+-- cargo stack instead of always taking a fresh empty slot -- otherwise
+-- identical drones/combs pile up across separate slots one at a time.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local matchingActive, matchingInactive = { fertility = 2 }, { fertility = 2 }
+  apiary(DOWN)[3] = mockBeeStack(matchingActive, matchingInactive, true)
+
+  -- Slot 5 already holds a genetically IDENTICAL bee (not yet full) --
+  -- should be the merge target. Slot 6 is empty and should be left alone.
+  world.agentInventory[5] = mockBeeStack(matchingActive, matchingInactive, true)
+
+  local config = { workingSlots = { 5, 6 } }
+  local site = { name = "harvest-stack-site", x = 5, z = 9, mode = "traitmax" }
+  local harvested = M.harvestSite(config, site)
+
+  check("harvestSite reports the harvest", harvested == 1, "harvested=" .. tostring(harvested))
+  check("harvestSite merged into the existing matching stack (slot 5), not a fresh slot",
+    world.selectedSlot == 5, "selected=" .. tostring(world.selectedSlot))
+  check("harvestSite left the empty slot 6 untouched", world.agentInventory[6] == nil)
+end
+
+-- ============================================================
 -- Test: dumpToStorage flies to storagePos and drops discarded drones
 -- ============================================================
 
@@ -483,8 +524,11 @@ do
   world.apiaries = {}
   world.agentInventory = {}
   world.dronePos = { x = 99, z = 99 }
+  -- Deliberately DIFFERENT genotypes -- two identical ones would now
+  -- (correctly) merge into one slot instead of spreading out; see the
+  -- dedicated stacking test below for that behavior specifically.
   world.agentInventory[10] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
-  world.agentInventory[11] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+  world.agentInventory[11] = mockBeeStack({ fertility = 2 }, { fertility = 2 }, true)
 
   local config = { storagePos = { x = 0, z = 0 }, storageSlotCount = 10 }
   local discardEntries = {
@@ -516,6 +560,39 @@ do
   check("dumpToTrash drops the discarded drone", dropped == 1, "dropped=" .. tostring(dropped))
   check("dumpToTrash flew to trashPos", world.dronePos.x == -3 and world.dronePos.z == -3)
   check("dumpToTrash actually placed the item at the trash position", apiary(DOWN)[1] ~= nil)
+end
+
+-- ============================================================
+-- Test: dumpToStorage merges a discarded drone into an existing matching
+-- storage stack instead of always taking a fresh empty slot -- otherwise
+-- repeated discards of genetically identical drones (common -- many weak
+-- default-quality drones look alike) pile up across separate slots one
+-- at a time instead of stacking.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+
+  local matchingActive, matchingInactive = { fertility = 1 }, { fertility = 1 }
+  -- Storage slot 1 already holds a genetically identical drone -- seeded
+  -- while dronePos IS the storage position, since apiary() keys off the
+  -- CURRENT drone position, not wherever it'll be by the time the code
+  -- under test actually flies there.
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = mockBeeStack(matchingActive, matchingInactive, true)
+
+  world.dronePos = { x = 99, z = 99 }
+  world.agentInventory[10] = mockBeeStack(matchingActive, matchingInactive, true)
+
+  local config = { storagePos = { x = 0, z = 0 }, storageSlotCount = 10 }
+  local discardEntries = { { drone = { id = "a", _slot = 10 } } }
+
+  local dropped = M.dumpToStorage(config, discardEntries, "keep-me")
+  check("dumpToStorage drops the discarded drone", dropped == 1, "dropped=" .. tostring(dropped))
+  check("dumpToStorage merged into the existing matching stack, not slot 2",
+    apiary(DOWN)[1].size == 2, "size=" .. tostring(apiary(DOWN)[1] and apiary(DOWN)[1].size))
+  check("dumpToStorage left slot 2 untouched", apiary(DOWN)[2] == nil)
 end
 
 -- ============================================================

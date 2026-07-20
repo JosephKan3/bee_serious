@@ -492,6 +492,62 @@ end
 -- flood the log every cycle.
 local diagDumpedSites = {}
 
+-- Whether two raw item stacks would actually merge in a real inventory
+-- slot: same item name, and if it's an analyzed bee, an EXACT genotype
+-- match (Forestry only stacks genetically identical drones -- princesses/
+-- queens never stack at all regardless of genotype, but those are
+-- already excluded from anything routed through here -- see
+-- isPrincessOrQueenStack). Species is a nested table ({name=,uid=,...}),
+-- not directly comparable with == , so it's matched by contents instead.
+local function stacksMatch(a, b)
+  if not a or not b or a.name ~= b.name then return false end
+  local ai, bi = a.individual, b.individual
+  if not ai and not bi then return true end
+  if not (ai and bi) then return false end
+  if ai.isAnalyzed ~= bi.isAnalyzed then return false end
+
+  local function valuesEqual(x, y)
+    if type(x) == "table" and type(y) == "table" then
+      return x.name == y.name and x.uid == y.uid
+    end
+    return x == y
+  end
+
+  for trait, v in pairs(ai.active or {}) do
+    if not valuesEqual(v, bi.active and bi.active[trait]) then return false end
+  end
+  for trait, v in pairs(ai.inactive or {}) do
+    if not valuesEqual(v, bi.inactive and bi.inactive[trait]) then return false end
+  end
+  -- Also catch b having traits a lacks -- otherwise a strict subset match
+  -- would slip through as "equal".
+  for trait in pairs(bi.active or {}) do
+    if ai.active == nil or ai.active[trait] == nil then return false end
+  end
+  return true
+end
+
+-- Picks the best destination slot for `incomingStack` among `slots`
+-- (an array of slot numbers, not necessarily contiguous -- e.g.
+-- config.workingSlots): an existing slot already holding a matching,
+-- not-yet-full stack if one exists (so the real inventory slot mechanic
+-- merges them instead of us wastefully spreading duplicates across
+-- separate slots), otherwise the first empty slot. getStackFn(slot)
+-- peeks that slot's raw stack (or nil if empty). Returns nil if neither
+-- a mergeable nor an empty slot exists.
+local function findStackingSlot(getStackFn, slots, incomingStack)
+  local firstEmpty = nil
+  for _, slot in ipairs(slots) do
+    local existing = getStackFn(slot)
+    if existing == nil then
+      firstEmpty = firstEmpty or slot
+    elseif stacksMatch(existing, incomingStack) and (existing.size or 1) < (existing.maxSize or 64) then
+      return slot
+    end
+  end
+  return firstEmpty
+end
+
 -- Forestry apiaries expose product/offspring output (combs, drones, the
 -- replacement princess) in every slot beyond the queen(1)/drone(2) pair.
 -- Confirmed via probeInventoryBelow() against real hardware: the old
@@ -529,16 +585,18 @@ function M.harvestSite(config, site, productSlots)
       -- already see is empty.
       local peek = invCtrl().getStackInSlot(down, productSlot)
       if peek then
-        for _, workingSlot in ipairs(config.workingSlots) do
-          if M.readOwnSlot(workingSlot) == nil then
-            -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
-            -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
-            -- it does not auto-pick an empty slot on its own.
-            agent().select(workingSlot)
-            local moved = invCtrl().suckFromSlot(down, productSlot, 1)
-            if moved and moved > 0 then harvested = harvested + 1 end
-            break
-          end
+        -- Prefers merging into an existing matching, not-yet-full cargo
+        -- stack over always taking a fresh empty slot -- without this,
+        -- identical harvested drones/combs spread across separate slots
+        -- one at a time instead of stacking together.
+        local workingSlot = findStackingSlot(invCtrl().getStackInInternalSlot, config.workingSlots, peek)
+        if workingSlot then
+          -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
+          -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
+          -- it does not auto-pick an empty slot on its own.
+          agent().select(workingSlot)
+          local moved = invCtrl().suckFromSlot(down, productSlot, 1)
+          if moved and moved > 0 then harvested = harvested + 1 end
         end
       end
     end
@@ -581,17 +639,24 @@ local function dumpEntriesAt(pos, slotCount, discardEntries, keepId)
   local ok = Nav.gotoXZ(pos.x, pos.z)
   if not ok then return 0 end
 
+  slotCount = slotCount or 54
+  local candidateSlots = {}
+  for s = 1, slotCount do table.insert(candidateSlots, s) end
+
   local down = sides().down
   local dropped = 0
   for _, entry in ipairs(discardEntries) do
     if entry.drone.id ~= keepId and entry.drone._slot then
-      agent().select(entry.drone._slot)
-      for slot = 1, (slotCount or 54) do
-        if invCtrl().getStackInSlot(down, slot) == nil then
-          if invCtrl().dropIntoSlot(down, slot) then
-            dropped = dropped + 1
-          end
-          break
+      local incoming = invCtrl().getStackInInternalSlot(entry.drone._slot)
+      -- Prefers merging into an existing matching, not-yet-full stack
+      -- already sitting in storage/trash over always taking a fresh
+      -- empty slot -- without this, identical discarded drones pile up
+      -- across separate slots one at a time instead of stacking.
+      local slot = findStackingSlot(function(s) return invCtrl().getStackInSlot(down, s) end, candidateSlots, incoming)
+      if slot then
+        agent().select(entry.drone._slot)
+        if invCtrl().dropIntoSlot(down, slot) then
+          dropped = dropped + 1
         end
       end
     end

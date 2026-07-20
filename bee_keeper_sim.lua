@@ -380,13 +380,22 @@ function M.install(config, sites, opts)
     end,
     -- Lands in the CURRENTLY SELECTED slot, same as dropIntoSlot above --
     -- not an auto-picked empty slot (matches real hardware; see
-    -- bee_keeper_manager.lua's M.harvestSite header notes).
+    -- bee_keeper_manager.lua's M.harvestSite header notes). If the
+    -- destination is already occupied, this models a real inventory's
+    -- merge (increments size) rather than refusing -- production code
+    -- only ever selects an occupied slot via findStackingSlot, which
+    -- already verified it's a genuine match.
     suckFromSlot = function(side, slot)
       if side ~= DOWN then return 0 end
       local a = apiaryAt(world.drone.x, world.drone.z)
       local selected = world.drone._selected
-      if a and a.products and a.products[slot] and world.drone.inventory[selected] == nil then
-        world.drone.inventory[selected] = a.products[slot]
+      if a and a.products and a.products[slot] then
+        local existing = world.drone.inventory[selected]
+        if existing then
+          existing.size = (existing.size or 1) + 1
+        else
+          world.drone.inventory[selected] = a.products[slot]
+        end
         a.products[slot] = nil
         return 1
       end
@@ -397,7 +406,12 @@ function M.install(config, sites, opts)
       local selected = world.drone._selected
       local stack = world.drone.inventory[selected]
       if not stack then return false end
-      world.storage[slot] = stack
+      local existing = world.storage[slot]
+      if existing then
+        existing.size = (existing.size or 1) + 1
+      else
+        world.storage[slot] = stack
+      end
       world.drone.inventory[selected] = nil
       return true
     end,
