@@ -40,6 +40,12 @@ M.realSleep = realSleep
 
 M.secondsPerAction = 1
 
+-- Separate, much faster pace for individual block movement (see
+-- Nav.onStep in bee_keeper_local_sim_run.lua) -- a multi-block walk
+-- shown one redraw per block at the full secondsPerAction pace would
+-- take forever to watch for anything but a short hop.
+M.secondsPerStep = 0.1
+
 -- ============================================================
 -- Terminal fitting
 -- ============================================================
@@ -185,30 +191,54 @@ end
 
 -- Converts a raw genotype (active/inactive per trait) into the
 -- stack.individual shape bee_keeper_manager.lua's readIndividual expects.
+-- Skips "_uid" -- toStack (below) caches a per-individual id directly on
+-- the raw genotype table, which isn't a trait and doesn't have
+-- .active/.inactive fields.
 local function toIndividual(rawGenotype)
   local active, inactive = {}, {}
   for trait, alleles in pairs(rawGenotype) do
-    active[trait] = alleles.active
-    inactive[trait] = alleles.inactive
+    if trait ~= "_uid" then
+      active[trait] = alleles.active
+      inactive[trait] = alleles.inactive
+    end
   end
   return { active = active, inactive = inactive, isAnalyzed = true }
 end
+-- Verbose-mode debugging aid: a stable, unique ID per actual individual
+-- bee (not per stack-merge, not re-assigned every time the SAME bee is
+-- re-read) -- lets a verbose inventory dump distinguish "this exact
+-- drone" from another that just happens to share its genotype. Cached
+-- directly on the RAW genotype table (rawGenotype._uid) the first time
+-- it's ever converted to a stack, so repeated peeks (e.g. re-reading an
+-- apiary's queen slot every cycle) return the SAME id instead of a fresh
+-- one each time.
+local nextBeeUid = 1
+local function nextUid()
+  local id = nextBeeUid
+  nextBeeUid = nextBeeUid + 1
+  return id
+end
+
 -- kind ("princess"/"drone"/nil) picks a real Forestry-style item name --
 -- bee_keeper_manager.lua's findPrincessCandidate matches on item name
 -- (case-insensitive "princess"/"queen"), so a generic name would make
 -- this sim unable to ever exercise that code path at all.
 local function toStack(rawGenotype, kind)
+  if rawGenotype._uid == nil then rawGenotype._uid = nextUid() end
   local name = "forestry:bee"
   if kind == "princess" then name = "Forestry:beePrincessGE"
   elseif kind == "drone" then name = "Forestry:beeDroneGE" end
-  return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype) }
+  return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype), _uid = rawGenotype._uid }
 end
 
 -- Inverse of toIndividual -- extracts a raw genotype (active/inactive per
 -- trait) back out of an individual table. Used when the production code
--- swaps a stack from cargo into an apiary slot.
-local function rawFromIndividual(individual)
-  local g = {}
+-- swaps a stack from cargo into an apiary slot. uid, if given (the
+-- source STACK's _uid, not the individual's -- individuals don't carry
+-- one), is threaded through so the same bee keeps the same id across the
+-- cargo<->apiary round trip instead of minting a new one.
+local function rawFromIndividual(individual, uid)
+  local g = { _uid = uid }
   for trait, activeValue in pairs(individual.active) do
     g[trait] = { active = activeValue, inactive = individual.inactive[trait] }
   end
@@ -690,7 +720,7 @@ function M.install(config, sites, opts)
       local newQueen = world.drone.inventory[selected]
       if newQueen and not isPrincessOrQueenStack(newQueen) then return false end
       local oldQueenRaw = a.princessRaw
-      a.princessRaw = newQueen and newQueen.individual and rawFromIndividual(newQueen.individual) or nil
+      a.princessRaw = newQueen and newQueen.individual and rawFromIndividual(newQueen.individual, newQueen._uid) or nil
       world.drone.inventory[selected] = oldQueenRaw and toStack(oldQueenRaw, "princess") or nil
       a.workTicks = 0
       return true
@@ -703,7 +733,7 @@ function M.install(config, sites, opts)
       local newDrone = world.drone.inventory[selected]
       if newDrone and not isDroneStack(newDrone) then return false end
       local oldDroneRaw = a.droneRaw
-      a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual) or nil
+      a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual, newDrone._uid) or nil
       world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil
       a.workTicks = 0
       return true
