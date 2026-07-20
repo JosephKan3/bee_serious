@@ -406,25 +406,54 @@ do
   world.agentInventory = {}
   world.dronePos = { x = 5, z = 9 }
   -- Apiary queen slot (1) deliberately left empty -- nothing assigned.
+  -- Cargo has ONLY the princess -- no drone candidate at all -- so this
+  -- specifically tests the "seeded but nothing left to load yet" partial
+  -- state, distinct from the fuller test below.
 
   local traitList = M.traitListFor("traitmax")
   local pActive, pInactive = makeAlleles(traitList, {})
-
-  -- A generic bee (not a princess by name) should NOT be picked...
-  world.agentInventory[4] = mockBeeStack(pActive, pInactive, true)
-  -- ...only this one, a real princess item, should.
   world.agentInventory[5] = mockPrincessStack(pActive, pInactive, true)
 
-  local config = { workingSlots = { 4, 5 }, minCopies = 2 }
+  local config = { workingSlots = { 5 }, minCopies = 2 }
   local site = { name = "empty-queen-site", x = 5, z = 9, mode = "traitmax" }
 
   local status = M.runQualitySite(config, site)
   check("runQualitySite seeds a princess instead of reporting no_princess_at_site",
     status:match("^seeded princess") ~= nil, status)
-  check("runQualitySite selected the actual princess item, not the generic bee",
+  check("runQualitySite selected the actual princess item to seed her",
     world.selectedSlot == 5, "selected=" .. tostring(world.selectedSlot))
   check("runQualitySite's swapQueen actually placed her in the apiary's queen slot",
     apiary(DOWN)[1] ~= nil and apiary(DOWN)[1].name == "Forestry:beePrincessGE")
+  check("with no drone candidates in cargo, it stops there for now",
+    status:find("no drone", 1, true) ~= nil, status)
+end
+
+-- ============================================================
+-- Test: when a drone candidate IS available in cargo, runQualitySite
+-- seeds the princess AND loads a drone in the SAME visit, instead of
+-- leaving the apiary half set up until whenever it's revisited again.
+-- This is the actual real-hardware bug: the robot was visibly
+-- "abandoning" an apiary mid-setup to wander off elsewhere.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local pActive, pInactive = makeAlleles(traitList, {})
+  world.agentInventory[4] = mockBeeStack(pActive, pInactive, true) -- drone candidate
+  world.agentInventory[5] = mockPrincessStack(pActive, pInactive, true)
+
+  local config = { workingSlots = { 4, 5 }, minCopies = 2 }
+  local site = { name = "empty-queen-site-2", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite seeds the princess AND loads a drone in one visit",
+    status:match("^seeded princess %+ loaded drone") ~= nil, status)
+  check("the apiary's princess slot actually has her", apiary(DOWN)[1] ~= nil)
+  check("the apiary's drone slot actually has a drone too", apiary(DOWN)[2] ~= nil)
 end
 
 do

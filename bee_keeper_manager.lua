@@ -305,6 +305,7 @@ function M.runQualitySite(config, site)
   end
 
   local princessIndividual = M.readSideSlot(down, 1)
+  local seededThisVisit = false
   if not princessIndividual then
     -- The apiary's queen slot is empty. This isn't necessarily "never
     -- had one" -- a spent queen is fully CONSUMED by Forestry once she
@@ -321,10 +322,18 @@ function M.runQualitySite(config, site)
     Status.setStep("Seeding princess into " .. (site.name or "?"))
     agent().select(princessSlot)
     if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-    -- Loading a drone against her happens next cycle, once she's readable
-    -- back out of the apiary (this cycle already consumed the working
-    -- slot she came from).
-    return "seeded princess, will load drone next cycle"
+    -- Continue straight into drone evaluation/loading below, in this
+    -- SAME visit, instead of leaving the apiary half set up (a princess
+    -- but no drone) until whenever it happens to be revisited again --
+    -- she's immediately readable back out via readSideSlot now that
+    -- she's actually installed, nothing technical requires waiting for
+    -- a separate cycle. This is what real-hardware watching caught:
+    -- the robot visibly "abandoning" an apiary mid-setup to wander off
+    -- elsewhere, only coming back to finish it much later (if a
+    -- different site's turn didn't get there first).
+    princessIndividual = M.readSideSlot(down, 1)
+    if not princessIndividual then return "swap_queen_failed_readback" end
+    seededThisVisit = true
   end
 
   Status.setStep("Evaluating drones for " .. (site.name or "?"))
@@ -338,7 +347,8 @@ function M.runQualitySite(config, site)
   site.progress = M.purityOf(traitList, princessBee.genotype)
   local dronePool = gatherCandidateDrones(config, traitList, targetSpecies)
   if #dronePool == 0 then
-    return "no_candidate_drones_in_working_slots"
+    return seededThisVisit and "seeded princess (no drone candidates in cargo yet)"
+      or "no_candidate_drones_in_working_slots"
   end
 
   local endgame = BB.isPhenotypicallyPerfect(traitList, princessBee.genotype)
@@ -346,7 +356,7 @@ function M.runQualitySite(config, site)
     config.minCopies, Cfg.weights)
 
   if not plan.breedWith then
-    return "no_viable_drone"
+    return seededThisVisit and "seeded princess (no viable drone yet)" or "no_viable_drone"
   end
 
   -- Discard drones the plan doesn't want, to make room. Default behavior:
@@ -386,7 +396,7 @@ function M.runQualitySite(config, site)
   local swapped = beekeeper().swapDrone(down)
   if not swapped then return "swap_drone_failed" end
 
-  return string.format("loaded drone (score %.1f)", plan.score)
+  return string.format("%sloaded drone (score %.1f)", seededThisVisit and "seeded princess + " or "", plan.score)
 end
 
 -- ============================================================
