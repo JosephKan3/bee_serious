@@ -77,6 +77,45 @@ function M.probeBlockBelow()
   return result
 end
 
+-- Prints (and writes to inventory_probe.log, so it's readable without
+-- relying on bee_keeper_manager_run.lua's print-logging being active --
+-- this is meant to be called standalone, e.g. from the lua> REPL via
+-- `require("bee_keeper_setup").probeInventoryBelow()`) every slot 1..N of
+-- the inventory directly below the drone's CURRENT position, where N is
+-- whatever inventory_controller.getInventorySize(down) reports. Call this
+-- while hovering over an apiary that visibly has a princess/drone/combs
+-- sitting in it (per the in-game GUI) to find out which slot numbers they
+-- ACTUALLY occupy -- config.productSlots (7-15) was inherited from the
+-- old Transposer-based script and isn't confirmed correct for every
+-- apiary tier/mod version; harvestSite silently pulling nothing is
+-- exactly the symptom of that range being wrong for a given real apiary.
+function M.probeInventoryBelow()
+  local ic = component().inventory_controller
+  local down = sides().down
+  local size = ic.getInventorySize(down)
+
+  local lines = { string.format("inventory_controller.getInventorySize(down) = %s", tostring(size)) }
+  for slot = 1, (size or 0) do
+    local stack = ic.getStackInSlot(down, slot)
+    if stack then
+      table.insert(lines, string.format("  slot %d: %s x%s (%s)",
+        slot, tostring(stack.name), tostring(stack.size), tostring(stack.label)))
+    else
+      table.insert(lines, string.format("  slot %d: empty", slot))
+    end
+  end
+
+  for _, line in ipairs(lines) do print(line) end
+
+  local f = io.open("inventory_probe.log", "w")
+  if f then
+    f:write(table.concat(lines, "\n") .. "\n")
+    f:close()
+  end
+
+  return lines
+end
+
 -- ============================================================
 -- Interactive prompts
 -- ============================================================
