@@ -17,12 +17,14 @@
   cycles         how many cycles to run (default 40)
   mode           traitmax (default), species, or mutation
   targetSpecies  only meaningful for species/mutation modes
-  hard           only for traitmax's general population -- scatters
-                 good alleles across three DIFFERENT starting drones
-                 instead of handing over an instant-good one (see
-                 bee_keeper_sim.lua's newWorld opts.hard); purebred
-                 stays reachable but now genuinely takes several real
-                 generations of combining separate lineages together
+  hard           affects traitmax's general population AND a
+                 species-mode site's targetSpecies population --
+                 scatters good QUALITY alleles across three DIFFERENT
+                 starting drone lineages instead of handing over an
+                 instant-good one (see bee_keeper_sim.lua's newWorld
+                 opts.hard); purebred stays reachable but now genuinely
+                 takes several real generations of combining separate
+                 lineages together. Mutation mode is unaffected.
 
   Prints one line per cycle (the same [mode] site: status log runCycle
   already returns) plus, after every cycle, a warning for any apiary

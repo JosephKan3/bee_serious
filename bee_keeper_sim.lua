@@ -209,6 +209,27 @@ local function makePartialGoodRaw(traitList, speciesName, goodTraitSet)
   return g
 end
 
+-- Splits every quality trait (excludes "species") into 3 roughly-equal
+-- groups -- shared by the traitmax and species "hard" seeding scenarios
+-- in M.newWorld below.
+local function qualityTraitGroups(traitList)
+  local qualityTraits = {}
+  for _, t in ipairs(traitList) do
+    if t ~= "species" then table.insert(qualityTraits, t) end
+  end
+  local groups = { {}, {}, {} }
+  for i, t in ipairs(qualityTraits) do
+    table.insert(groups[((i - 1) % 3) + 1], t)
+  end
+  return groups
+end
+
+local function toSet(list)
+  local set = {}
+  for _, t in ipairs(list) do set[t] = true end
+  return set
+end
+
 -- Converts a raw genotype (active/inactive per trait) into the
 -- stack.individual shape bee_keeper_manager.lua's readIndividual expects.
 -- Skips "_uid" -- toStack (below) caches a per-individual id directly on
@@ -494,19 +515,7 @@ function M.newWorld(config, sites, opts)
     -- lua's header notes) is itself a slow, genuinely hard process, not
     -- guaranteed to finish within any particular number of cycles --
     -- that's the whole point of "hard" mode, not a bug to fix.
-    local qualityTraits = {}
-    for _, t in ipairs(traitList) do
-      if t ~= "species" then table.insert(qualityTraits, t) end
-    end
-    local groups = { {}, {}, {} }
-    for i, t in ipairs(qualityTraits) do
-      table.insert(groups[((i - 1) % 3) + 1], t)
-    end
-    local function toSet(list)
-      local set = {}
-      for _, t in ipairs(list) do set[t] = true end
-      return set
-    end
+    local groups = qualityTraitGroups(traitList)
 
     -- 4 copies of each lineage -- 2 in cargo, 2 in storage -- reduces
     -- (does not eliminate) the chance of a trait vanishing outright
@@ -535,6 +544,14 @@ function M.newWorld(config, sites, opts)
     putStorage(makeGoodRaw(traitList, "Forest"))
   end
 
+  -- Seeded once per DISTINCT targetSpecies, not once per site -- sites
+  -- sharing the same target (the normal case: both CLI runners assign
+  -- ONE mode/targetSpecies to every site in a run) would otherwise each
+  -- demand their own full set of cargo slots, easily overflowing
+  -- workingSlots' fixed size (confirmed: 3 same-target species sites in
+  -- "hard" mode tried to claim 21 slots on top of the general
+  -- population's own 7, well past the usual 15 available).
+  local seededSpecies = {}
   for _, s in ipairs(sites) do
     if s.mode == "mutation" then
       -- A real mutation pair needs ONE princess/queen + ONE drone
@@ -544,9 +561,35 @@ function M.newWorld(config, sites, opts)
       -- would actually be a princess.
       put(makeStartingRaw(traitList, "Forest"), "princess")
       put(makeStartingRaw(traitList, "Meadows"), "drone")
-    elseif s.mode == "species" and s.targetSpecies then
-      put(makeGoodRaw(traitList, s.targetSpecies), "princess")
-      put(makeGoodRaw(traitList, s.targetSpecies), "drone")
+    elseif s.mode == "species" and s.targetSpecies and not seededSpecies[s.targetSpecies] then
+      seededSpecies[s.targetSpecies] = true
+      if opts.hard then
+        -- Same "hard" treatment as the general traitmax population above
+        -- (see its header notes for the full reasoning): the princess
+        -- and every drone are already the correct targetSpecies -- an
+        -- always-true state for species mode, matched by real Forestry
+        -- (species purity, once achieved, doesn't randomly regress the
+        -- way a quality trait can) -- but the QUALITY traits are
+        -- scattered across separate lineages instead of any one of them
+        -- already being fully purebred. Reaching a genuinely perfect
+        -- purebred-species bee now takes real generations of combining
+        -- them, not an instant win on cycle 1.
+        local groups = qualityTraitGroups(traitList)
+        put(makeStartingRaw(traitList, s.targetSpecies), "princess")
+        for _, group in ipairs(groups) do
+          put(makePartialGoodRaw(traitList, s.targetSpecies, toSet(group)))
+        end
+        putStorage(makeStartingRaw(traitList, s.targetSpecies), "princess")
+        for _, group in ipairs(groups) do
+          put(makePartialGoodRaw(traitList, s.targetSpecies, toSet(group)))
+        end
+        for _, group in ipairs(groups) do
+          putStorage(makePartialGoodRaw(traitList, s.targetSpecies, toSet(group)))
+        end
+      else
+        put(makeGoodRaw(traitList, s.targetSpecies), "princess")
+        put(makeGoodRaw(traitList, s.targetSpecies), "drone")
+      end
     end
   end
 
@@ -555,9 +598,26 @@ function M.newWorld(config, sites, opts)
   -- (see component.beekeeper.analyze below), so cargo's stock is finite
   -- and will genuinely run dry over a long run. Without a backup
   -- somewhere else, M.restockHoney's fallback path would have nothing to
-  -- find and analysis would just permanently stop working.
-  world.storage[nextStorageSlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
-  nextStorageSlot = nextStorageSlot + 1
+  -- find and analysis would just permanently stop working. Several full
+  -- stacks (not just one) -- a single 64-stack restock trip empties the
+  -- ENTIRE backup in one go (suckFromSlot pulls a whole matching stack,
+  -- capped at MAX_STACK=64 per slot), leaving nothing for any FUTURE
+  -- restock once that single stack was ever tapped. A long run (or
+  -- "hard" mode's many extra generations, each producing more
+  -- unanalyzed offspring) burns through honey much faster than a quick
+  -- demo does -- confirmed empirically: a single backup stack (64) ran
+  -- completely dry by cycle ~30 of a "hard" species run, and even 6
+  -- backup stacks (384) only lasted to cycle 126. 12 stacks (768, plus
+  -- cargo's own 64 = 832 total) lasts roughly 250 cycles in that same
+  -- worst-case scenario -- comfortably past any normal test/demo run,
+  -- while still leaving real headroom in storage's 27-slot default
+  -- (hard mode's own scattered lineages already use up to 8 slots
+  -- there).
+  local HONEY_BACKUP_STACKS = 12
+  for _ = 1, HONEY_BACKUP_STACKS do
+    world.storage[nextStorageSlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
+    nextStorageSlot = nextStorageSlot + 1
+  end
 
   return world
 end

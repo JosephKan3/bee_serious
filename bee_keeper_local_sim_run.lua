@@ -11,17 +11,23 @@
     lua bee_keeper_local_sim_run.lua [ui] [verbose] [paused] [hard] [cycles] [mode] [targetSpecies] [WxH]
 
   ui            show the live dashboard (same as the real run script's "ui")
-  hard          only for traitmax's general population -- normally cargo
-                starts with an instant-good (fully purebred) drone and
-                princess ready to go, so a traitmax site can max out in
-                a couple of cycles. "hard" instead scatters good alleles
-                across three DIFFERENT starting drones (each covering
-                only a third of the tracked traits) -- every trait's
-                good allele genuinely exists somewhere in the starting
-                population (so purebred stays reachable), but only by
-                actually combining those separate lineages via several
-                real generations of breeding, not by getting lucky with
-                an instant-good bee on cycle 1.
+  hard          affects traitmax's general population AND any
+                species-mode site's targetSpecies population -- normally
+                cargo starts with an instant-good (fully purebred) drone
+                and princess ready to go, so a site can max out in a
+                couple of cycles. "hard" instead scatters good alleles
+                across three DIFFERENT starting drone lineages (each
+                covering only a third of the tracked QUALITY traits --
+                species itself is always already correct for a
+                species-mode site, matching real Forestry: species
+                purity doesn't randomly regress the way a quality trait
+                can) -- every trait's good allele genuinely exists
+                somewhere in the starting population (so purebred stays
+                reachable), but only by actually combining those
+                separate lineages via several real generations of
+                breeding, not by getting lucky with an instant-good bee
+                on cycle 1. Mutation mode is unaffected (already
+                inherently slow/probabilistic).
   verbose       after every cycle, dump EVERYTHING in the simulated
                 world: the agent's own status (position/facing/energy/
                 selected slot), every occupied cargo slot, every occupied
