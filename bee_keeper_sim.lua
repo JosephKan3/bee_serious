@@ -355,32 +355,25 @@ function M.newWorld(config, sites)
     },
   }
 
-  -- Seed traitmax/species sites with a mediocre starting princess so
-  -- there's real work to do (an empty apiary would just report
-  -- no_princess_at_site forever). Mutation sites start genuinely empty --
-  -- runMutationSite sources its own pair from cargo and swaps both in, so
-  -- pre-seeding a princess there would just get immediately swapped back
-  -- out on the first attempt.
+  -- Sites start with EMPTY apiaries, regardless of mode -- a real apiary
+  -- might have leftover state from previous Minecraft play the sim has
+  -- no way to know about, so the safe, consistent assumption is "nothing
+  -- there yet". This exercises bee_keeper_manager.lua's OWN
+  -- princess-seeding (findPrincessCandidate) and drone-loading logic
+  -- from a cold start, same as a freshly placed apiary would need.
   for _, s in ipairs(sites) do
-    if s.mode == "mutation" then
-      world.apiaries[s.x .. ":" .. s.z] = { princessRaw = nil, droneRaw = nil, workTicks = 0, workNeeded = 2 }
-    else
-      local speciesName = s.mode == "species" and (s.targetSpecies or "Forest") or "Forest"
-      world.apiaries[s.x .. ":" .. s.z] = {
-        princessRaw = makeStartingRaw(traitList, speciesName),
-        droneRaw = nil,
-        workTicks = 0,
-        workNeeded = 2,
-      }
-    end
+    world.apiaries[s.x .. ":" .. s.z] = { princessRaw = nil, droneRaw = nil, workTicks = 0, workNeeded = 2 }
   end
 
-  -- Seed cargo: a couple of strong candidate drones, a couple of weak
-  -- ones, honey, and (for mutation/species demo sites) whatever species
-  -- each of those specifically needs. Iterates config.workingSlots (not a
-  -- blind 1,2,3.. counter) and skips config.honeySlot, so seeding can't
-  -- silently clobber the honey slot or land somewhere outside the pool
-  -- bee_keeper_manager.lua actually looks at.
+  -- Seed a real starting population, split across cargo AND storage --
+  -- since apiaries start empty (above), bee_keeper_manager.lua needs
+  -- something to actually bootstrap from: a princess-type item for every
+  -- species a site needs, plus a handful of drones to choose among.
+  -- put() seeds cargo (config.workingSlots, skipping honeySlot, so
+  -- seeding can't silently clobber the honey slot or land outside the
+  -- pool bee_keeper_manager.lua actually looks at); putStorage() seeds
+  -- storage directly, so M.restockFromStorage's fallback path is
+  -- exercised from cycle 1, not only after the first discard.
   local nextWorkingSlotIndex = 1
   local function put(rawGenotype, kind)
     while config.workingSlots[nextWorkingSlotIndex] == config.honeySlot do
@@ -391,9 +384,22 @@ function M.newWorld(config, sites)
     world.drone.inventory[slot] = toStack(rawGenotype, kind or "drone")
   end
 
+  local nextStorageSlot = 1
+  local function putStorage(rawGenotype, kind)
+    world.storage[nextStorageSlot] = toStack(rawGenotype, kind or "drone")
+    nextStorageSlot = nextStorageSlot + 1
+  end
+
+  -- General-purpose population for traitmax sites (species-agnostic) --
+  -- 2 princesses + 2 drones in cargo, 1 more of each in storage, enough
+  -- to bootstrap a handful of traitmax apiaries within the first couple
+  -- of cycles without waiting on organic growth.
+  put(makeStartingRaw(traitList, "Forest"), "princess")
   put(makeGoodRaw(traitList, "Forest"))
   put(makeStartingRaw(traitList, "Forest"))
-  put(makeGoodRaw(traitList, "Forest"))
+  put(makeGoodRaw(traitList, "Forest"), "princess")
+  putStorage(makeStartingRaw(traitList, "Forest"), "princess")
+  putStorage(makeGoodRaw(traitList, "Forest"))
 
   for _, s in ipairs(sites) do
     if s.mode == "mutation" then
@@ -405,7 +411,8 @@ function M.newWorld(config, sites)
       put(makeStartingRaw(traitList, "Forest"), "princess")
       put(makeStartingRaw(traitList, "Meadows"), "drone")
     elseif s.mode == "species" and s.targetSpecies then
-      put(makeGoodRaw(traitList, s.targetSpecies))
+      put(makeGoodRaw(traitList, s.targetSpecies), "princess")
+      put(makeGoodRaw(traitList, s.targetSpecies), "drone")
     end
   end
 
@@ -564,19 +571,35 @@ function M.install(config, sites, opts)
     -- (capped at 64), creates a fresh one if empty, or fails outright if
     -- the destination holds something incompatible -- exactly like a
     -- real inventory slot, not a blind "+1".
+    -- Works against EITHER storage (M.restockFromStorage pulls bees back
+    -- out of it) or an apiary's output slots (M.harvestSite) -- same
+    -- branching as getStackInSlot/dropIntoSlot below. Trash never has
+    -- anything to suck FROM (it auto-deletes on contact).
     suckFromSlot = function(side, slot, count)
       if side ~= DOWN then return 0 end
-      if atTrash() or atStorage() then return 0 end -- nothing to suck FROM there in this flow
-      local a = apiaryAt(world.drone.x, world.drone.z)
-      if not a or slot < 1 or slot > APIARY_SIZE or isFrameSlot(slot) then return 0 end
-      if not a.products or not a.products[slot] then return 0 end
+      if atTrash() then return 0 end
 
-      local source = a.products[slot]
+      local sourceContainer, sourceSlot
+      if atStorage() then
+        if slot < 1 or slot > world.storageSize then return 0 end
+        sourceContainer, sourceSlot = world.storage, slot
+      else
+        local a = apiaryAt(world.drone.x, world.drone.z)
+        if not a or slot < 1 or slot > APIARY_SIZE or isFrameSlot(slot) or slot == 1 or slot == 2 then
+          return 0 -- princess/drone slots only ever move via swapQueen/swapDrone
+        end
+        a.products = a.products or {}
+        sourceContainer, sourceSlot = a.products, slot
+      end
+
+      local source = sourceContainer[sourceSlot]
+      if not source then return 0 end
+
       local selected = world.drone._selected
       local moved = depositInto(world.drone.inventory, selected, source, count or 1)
       if moved > 0 then
         source.size = (source.size or 1) - moved
-        if source.size <= 0 then a.products[slot] = nil end
+        if source.size <= 0 then sourceContainer[sourceSlot] = nil end
       end
       return moved
     end,
@@ -799,6 +822,75 @@ function M.install(config, sites, opts)
 
   M.world = world
   return world
+end
+
+-- ============================================================
+-- Verbose debugging dump
+-- ============================================================
+
+local function formatStack(stack)
+  if not stack then return "empty" end
+  if stack.individual then
+    local species = stack.individual.active and stack.individual.active.species
+    local speciesName = species and Cfg.speciesKey(species) or "?"
+    local uidStr = stack._uid and (" [uid=" .. stack._uid .. "]") or ""
+    return string.format("%s x%s (%s)%s", stack.name, tostring(stack.size or 1), speciesName, uidStr)
+  end
+  return string.format("%s x%s", stack.name, tostring(stack.size or 1))
+end
+
+local function sortedKeys(t)
+  local keys = {}
+  for k in pairs(t) do table.insert(keys, k) end
+  table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+  return keys
+end
+
+-- Dumps EVERYTHING in the simulated world -- the agent's own
+-- status (position/facing/energy/selected slot), cargo, storage, and
+-- every apiary's queen/drone/output slots -- read directly off world
+-- state, not through the side-relative production API (this is a
+-- debugging tool with full internal access, unlike
+-- bee_keeper_manager.lua, which can only ever see whatever's directly
+-- below it). Meant to be called from bee_keeper_local_sim_run.lua's
+-- "verbose" flag.
+function M.dumpWorld()
+  local world = M.world
+  if not world then return end
+
+  print(string.format("  --- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
+    world.drone.x, world.drone.z, world.drone.facing, (world.drone.energy or 0) * 100,
+    tostring(world.drone._selected)))
+
+  print("  --- cargo ---")
+  local cargoSlots = sortedKeys(world.drone.inventory)
+  if #cargoSlots == 0 then print("    (empty)") end
+  for _, slot in ipairs(cargoSlots) do
+    print(string.format("    slot %d: %s", slot, formatStack(world.drone.inventory[slot])))
+  end
+
+  print("  --- storage ---")
+  local storageSlots = sortedKeys(world.storage)
+  if #storageSlots == 0 then print("    (empty)") end
+  for _, slot in ipairs(storageSlots) do
+    print(string.format("    slot %d: %s", slot, formatStack(world.storage[slot])))
+  end
+
+  print("  --- apiaries ---")
+  for _, key in ipairs(sortedKeys(world.apiaries)) do
+    local a = world.apiaries[key]
+    print(string.format("    apiary @ (%s) -- work %d/%d:", key, a.workTicks, a.workNeeded))
+    print("      slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess")) or "empty"))
+    print("      slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone")) or "empty"))
+    local productSlots = sortedKeys(a.products or {})
+    if #productSlots == 0 then
+      print("      outputs (6-12): (empty)")
+    else
+      for _, slot in ipairs(productSlots) do
+        print(string.format("      slot %d (output): %s", slot, formatStack(a.products[slot])))
+      end
+    end
+  end
 end
 
 return M

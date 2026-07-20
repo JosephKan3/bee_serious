@@ -11,10 +11,13 @@
     lua bee_keeper_local_sim_run.lua [ui] [verbose] [cycles] [mode] [targetSpecies] [WxH]
 
   ui            show the live dashboard (same as the real run script's "ui")
-  verbose       after every cycle, dump every occupied cargo AND storage
-                slot -- item, quantity, species, and a stable per-bee UID
-                (see bee_keeper_sim.lua's toStack) so you can tell two
-                genetically-identical drones apart, or track one
+  verbose       after every cycle, dump EVERYTHING in the simulated
+                world: the agent's own status (position/facing/energy/
+                selected slot), every occupied cargo slot, every occupied
+                storage slot, and every apiary's queen/drone/output
+                slots -- item, quantity, species, and a stable per-bee
+                UID (see bee_keeper_sim.lua's toStack) so you can tell
+                two genetically-identical drones apart, or track one
                 specific individual across cycles. Works with or without
                 "ui" (prints as plain text either way, so combining it
                 with "ui" interleaves with the dashboard's redraws).
@@ -130,35 +133,12 @@ local function listSimStorage()
   return list
 end
 
--- One line per occupied slot: item, quantity, species (for bees), and
--- the stable per-individual UID bee_keeper_sim.lua's toStack assigns --
--- lets you tell two genetically-identical drones apart, or track one
--- specific individual (e.g. a princess) across cycles as she moves
--- between cargo and an apiary.
-local function formatStackVerbose(stack)
-  if stack.individual then
-    local species = stack.individual.active and stack.individual.active.species
-    local Cfg = require("bee_trait_config")
-    local speciesName = species and Cfg.speciesKey(species) or "?"
-    return string.format("%s x%s (%s)%s", stack.name, tostring(stack.size or 1), speciesName,
-      stack._uid and (" [uid=" .. stack._uid .. "]") or "")
-  end
-  return string.format("%s x%s", stack.name, tostring(stack.size or 1))
-end
-
+-- Delegates to Sim.dumpWorld() -- agent status, cargo, storage, AND
+-- every apiary's queen/drone/output slots, read directly off world
+-- state (formatting logic lives in bee_keeper_sim.lua since it already
+-- owns the raw-genotype<->stack conversion internals this needs).
 local function dumpVerbose()
-  print("  --- cargo ---")
-  local cargo = M.listCargo(config)
-  if #cargo == 0 then print("    (empty)") end
-  for _, entry in ipairs(cargo) do
-    print(string.format("    slot %d: %s", entry.slot, formatStackVerbose(entry.stack)))
-  end
-  print("  --- storage ---")
-  local storage = listSimStorage()
-  if #storage == 0 then print("    (empty)") end
-  for _, entry in ipairs(storage) do
-    print(string.format("    slot %d: %s", entry.slot, formatStackVerbose(entry.stack)))
-  end
+  Sim.dumpWorld()
 end
 
 if uiEnabled then
