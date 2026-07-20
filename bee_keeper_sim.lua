@@ -358,17 +358,17 @@ function M.newWorld(config, sites)
     },
     apiaries = {}, -- key "x:z" -> { princessRaw, droneRaw, workTicks, workNeeded }
     storage = {},
-    -- uid + stepCounter snapshot of the drone bee most recently moved
-    -- (loaded into an apiary or discarded), so the verbose dump can flash
-    -- its item name cyan for the ENTIRE task/step it becomes visible in
-    -- (not just a single redraw) -- see M.tickStep/formatStackSegments
-    -- below. stepCounter increments once per Status.onChange (one whole
-    -- task), driven from outside by M.tickStep -- NOT per Nav.onStep
-    -- block-move, so a multi-block walk redraws with the flash held
-    -- steady the whole time instead of it vanishing after the first
-    -- block.
-    recentlyMovedDroneUid = nil,
-    recentlyMovedDroneStep = nil,
+    -- uid + stepCounter snapshot of the bee (princess OR drone) most
+    -- recently moved (loaded into an apiary or discarded), so the
+    -- verbose dump can flash its WHOLE row cyan for the ENTIRE task/step
+    -- it becomes visible in (not just a single redraw) -- see
+    -- M.tickStep/flashRow below. stepCounter increments once per
+    -- Status.onChange (one whole task), driven from outside by
+    -- M.tickStep -- NOT per Nav.onStep block-move, so a multi-block walk
+    -- redraws with the flash held steady the whole time instead of it
+    -- vanishing after the first block.
+    recentlyMovedBeeUid = nil,
+    recentlyMovedBeeStep = nil,
     stepCounter = 0,
     mutationRecipes = {
       -- A generous chance so a local demo run actually shows a mutation
@@ -473,13 +473,16 @@ function M.install(config, sites, opts)
   local function atStorage() return config.storagePos and atPos(config.storagePos.x, config.storagePos.z) end
   local function atTrash() return config.trashPos and atPos(config.trashPos.x, config.trashPos.z) end
 
-  -- Stamps world.recentlyMovedDroneUid/Step together (always as a pair --
-  -- see M.tickStep/formatStackSegments for how the step snapshot decides
-  -- how long the cyan flash stays visible).
-  local function markDroneMoved(stack)
-    if not isDroneStack(stack) then return end
-    world.recentlyMovedDroneUid = stack._uid
-    world.recentlyMovedDroneStep = world.stepCounter
+  -- Stamps world.recentlyMovedBeeUid/Step together (always as a pair --
+  -- see M.tickStep/flashRow for how the step snapshot decides how long
+  -- the cyan flash stays visible). Applies to EITHER role -- a princess
+  -- being seeded into an apiary is just as much "a bee that just moved"
+  -- as a drone being loaded or discarded.
+  local function markBeeMoved(stack)
+    if not stack or not stack._uid then return end
+    if not (isPrincessOrQueenStack(stack) or isDroneStack(stack)) then return end
+    world.recentlyMovedBeeUid = stack._uid
+    world.recentlyMovedBeeStep = world.stepCounter
   end
 
   -- Apiary slot layout (always 12 total): 1=princess, 2=drone (each ONLY
@@ -657,7 +660,7 @@ function M.install(config, sites, opts)
       if atTrash() then
         if slot ~= 1 then return false end
         world.drone.inventory[selected] = nil
-        markDroneMoved(stack)
+        markBeeMoved(stack)
         return true
       end
 
@@ -667,7 +670,7 @@ function M.install(config, sites, opts)
         if moved <= 0 then return false end
         stack.size = (stack.size or 1) - moved
         if stack.size <= 0 then world.drone.inventory[selected] = nil end
-        markDroneMoved(stack)
+        markBeeMoved(stack)
         return true
       end
 
@@ -791,6 +794,7 @@ function M.install(config, sites, opts)
       a.princessRaw = newQueen and newQueen.individual and rawFromIndividual(newQueen.individual, newQueen._uid) or nil
       world.drone.inventory[selected] = oldQueenRaw and toStack(oldQueenRaw, "princess") or nil
       a.workTicks = 0
+      if newQueen then markBeeMoved(newQueen) end
       return true
     end,
     swapDrone = function(side)
@@ -804,7 +808,7 @@ function M.install(config, sites, opts)
       a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual, newDrone._uid) or nil
       world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil
       a.workTicks = 0
-      if newDrone then markDroneMoved(newDrone) end
+      if newDrone then markBeeMoved(newDrone) end
       return true
     end,
     -- Consumes 1 honey/honeydew from honeySlot (real Forestry: analyzing
@@ -909,7 +913,12 @@ local TRAIT_ABBR = {
 local COLOR_DEFAULT = 0xE0E0E0
 local COLOR_PRINCESS = 0xFF69B4 -- pink
 local COLOR_DRONE = 0xFFA030 -- orange
-local COLOR_DRONE_MOVED = 0x00E0E0 -- cyan, momentary -- see world.recentlyMovedDroneUid
+-- Cyan whole-row flash for a bee that just moved (see world.recentlyMovedBeeUid
+-- and flashRow below). Only ever applied to segments that are still
+-- COLOR_DEFAULT at that point -- princess pink, drone orange, and the
+-- allele green/red already painted by traitSegments all stay layered on
+-- top, untouched.
+local COLOR_MOVED = 0x00E0E0 -- cyan, momentary
 local COLOR_GOOD = 0x00E000 -- green, matches the "good" allele
 local COLOR_BAD = 0xE00000 -- red, matches the "bad" allele
 
@@ -931,6 +940,34 @@ end
 local function append(segments, more)
   for _, seg in ipairs(more) do table.insert(segments, seg) end
   return segments
+end
+
+-- Whether `stack` is the bee world.recentlyMovedBeeUid/Step is currently
+-- flashing for -- true for exactly the step it was moved becoming
+-- visible in (stepCounter advanced by 1 since the move), per M.tickStep.
+local function wasRecentlyMoved(stack)
+  local world = M.world
+  if not (world and stack and stack._uid) then return false end
+  return stack._uid == world.recentlyMovedBeeUid
+    and world.recentlyMovedBeeStep ~= nil
+    and (world.stepCounter - world.recentlyMovedBeeStep) <= 1
+end
+
+-- Flashes an ENTIRE row (e.g. a prefix like "  slot 2 (drone): " appended
+-- with formatStackSegments' own output) cyan when `shouldFlash` is true
+-- -- but only for segments still at COLOR_DEFAULT. Princess pink, drone
+-- orange, and allele green/red are each a deliberate, "outside of normal
+-- white" color already, so they stay layered on top untouched instead of
+-- being overridden. Returns a NEW array -- never mutates `segments`, so
+-- the same formatStackSegments call stays reusable elsewhere unflashed.
+local function flashRow(segments, shouldFlash)
+  if not shouldFlash then return segments end
+  local flashed = {}
+  for _, seg in ipairs(segments) do
+    local color = (seg.color == COLOR_DEFAULT) and COLOR_MOVED or seg.color
+    table.insert(flashed, { text = seg.text, color = color })
+  end
+  return flashed
 end
 
 -- GG/Gb/bG/bb per active/meaningful trait (excludes "any"-kind traits
@@ -961,23 +998,17 @@ end
 -- traitSegments) -- per your call, shown for cargo/storage always, and
 -- for an apiary's princess/drone specifically, but NOT its output slots.
 -- The item name itself is colored pink for a princess/queen, orange for
--- a drone.
+-- a drone -- these (and the allele green/red from traitSegments) are the
+-- row's own "real" colors; the moved-bee cyan flash is layered on top of
+-- everything ELSE afterward, by flashRow, not decided here.
 local function formatStackSegments(stack, showTraits)
   if not stack then return { { text = "empty", color = COLOR_DEFAULT } } end
 
-  -- Princess pink and allele green/red (see traitSegments) always take
-  -- priority -- this only ever affects a plain drone's own name color.
-  -- Held cyan for the ENTIRE step during which the move becomes visible
-  -- (stepCounter advanced by exactly 1 since the move), not just a single
-  -- redraw -- see M.tickStep/world.recentlyMovedDroneStep.
   local nameColor = COLOR_DEFAULT
   if isPrincessOrQueenStack(stack) then
     nameColor = COLOR_PRINCESS
   elseif isDroneStack(stack) then
-    local world = M.world
-    local recentlyMoved = world and stack._uid and stack._uid == world.recentlyMovedDroneUid
-      and world.recentlyMovedDroneStep and (world.stepCounter - world.recentlyMovedDroneStep) <= 1
-    nameColor = recentlyMoved and COLOR_DRONE_MOVED or COLOR_DRONE
+    nameColor = COLOR_DRONE
   end
 
   local segments = { { text = stack.name, color = nameColor } }
@@ -1068,7 +1099,9 @@ function M.dumpWorld(sink, sites)
   local cargoSlots = sortedKeys(world.drone.inventory)
   if #cargoSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(cargoSlots) do
-    sink(append(line(string.format("  slot %d: ", slot)), formatStackSegments(world.drone.inventory[slot], true)))
+    local stack = world.drone.inventory[slot]
+    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true))
+    sink(flashRow(row, wasRecentlyMoved(stack)))
   end
   sink(line(""))
   sink(line(""))
@@ -1077,7 +1110,9 @@ function M.dumpWorld(sink, sites)
   local storageSlots = sortedKeys(world.storage)
   if #storageSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(storageSlots) do
-    sink(append(line(string.format("  slot %d: ", slot)), formatStackSegments(world.storage[slot], true)))
+    local stack = world.storage[slot]
+    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true))
+    sink(flashRow(row, wasRecentlyMoved(stack)))
   end
   sink(line(""))
   sink(line(""))
@@ -1087,28 +1122,37 @@ function M.dumpWorld(sink, sites)
     local a = world.apiaries[key]
     local label = posToName[key] or key
     sink(line(string.format("  %s @ (%s) -- work %d/%d:", label, key, a.workTicks, a.workNeeded)))
-    sink(append(line("    slot 1 (princess): "),
-      a.princessRaw and formatStackSegments(toStack(a.princessRaw, "princess"), true) or line("empty")))
-    sink(append(line("    slot 2 (drone): "),
-      a.droneRaw and formatStackSegments(toStack(a.droneRaw, "drone"), true) or line("empty")))
+
+    local princessStack = a.princessRaw and toStack(a.princessRaw, "princess") or nil
+    local princessRow = append(line("    slot 1 (princess): "),
+      princessStack and formatStackSegments(princessStack, true) or line("empty"))
+    sink(flashRow(princessRow, wasRecentlyMoved(princessStack)))
+
+    local droneStack = a.droneRaw and toStack(a.droneRaw, "drone") or nil
+    local droneRow = append(line("    slot 2 (drone): "),
+      droneStack and formatStackSegments(droneStack, true) or line("empty"))
+    sink(flashRow(droneRow, wasRecentlyMoved(droneStack)))
+
     local productSlots = sortedKeys(a.products or {})
     if #productSlots == 0 then
       sink(line("    outputs (6-12): (empty)"))
     else
       for _, slot in ipairs(productSlots) do
-        sink(append(line(string.format("    slot %d (output): ", slot)), formatStackSegments(a.products[slot])))
+        local stack = a.products[slot]
+        local row = append(line(string.format("    slot %d (output): ", slot)), formatStackSegments(stack))
+        sink(flashRow(row, wasRecentlyMoved(stack)))
       end
     end
     sink(line(""))
   end
 end
 
--- Advances the step counter the cyan "drone just moved" flash is timed
--- against (see world.recentlyMovedDroneStep/formatStackSegments). Call
--- this exactly once per NEW task/step (i.e. from Status.onChange), NOT
--- per Nav.onStep block-move -- so a multi-block walk redraws with the
--- flash held steady for its entire duration instead of it decaying
--- after the first block.
+-- Advances the step counter the cyan "bee just moved" row flash is timed
+-- against (see world.recentlyMovedBeeStep/wasRecentlyMoved). Call this
+-- exactly once per NEW task/step (i.e. from Status.onChange), NOT per
+-- Nav.onStep block-move -- so a multi-block walk redraws with the flash
+-- held steady for its entire duration instead of it decaying after the
+-- first block.
 function M.tickStep()
   if M.world then M.world.stepCounter = M.world.stepCounter + 1 end
 end
