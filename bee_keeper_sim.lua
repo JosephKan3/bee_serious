@@ -193,8 +193,15 @@ local function toIndividual(rawGenotype)
   end
   return { active = active, inactive = inactive, isAnalyzed = true }
 end
-local function toStack(rawGenotype)
-  return { name = "forestry:bee", individual = toIndividual(rawGenotype) }
+-- kind ("princess"/"drone"/nil) picks a real Forestry-style item name --
+-- bee_keeper_manager.lua's findPrincessCandidate matches on item name
+-- (case-insensitive "princess"/"queen"), so a generic name would make
+-- this sim unable to ever exercise that code path at all.
+local function toStack(rawGenotype, kind)
+  local name = "forestry:bee"
+  if kind == "princess" then name = "Forestry:beePrincessGE"
+  elseif kind == "drone" then name = "Forestry:beeDroneGE" end
+  return { name = name, individual = toIndividual(rawGenotype) }
 end
 
 -- Inverse of toIndividual -- extracts a raw genotype (active/inactive per
@@ -272,7 +279,7 @@ function M.newWorld(config, sites)
     end
     local slot = config.workingSlots[nextWorkingSlotIndex]
     nextWorkingSlotIndex = nextWorkingSlotIndex + 1
-    world.drone.inventory[slot] = toStack(rawGenotype)
+    world.drone.inventory[slot] = toStack(rawGenotype, "drone")
   end
 
   put(makeGoodRaw(traitList, "Forest"))
@@ -366,8 +373,8 @@ function M.install(config, sites, opts)
       if atStorage() then return world.storage[slot] end
       local a = apiaryAt(world.drone.x, world.drone.z)
       if not a then return nil end
-      if slot == 1 then return a.princessRaw and toStack(a.princessRaw) or nil end
-      if slot == 2 then return a.droneRaw and toStack(a.droneRaw) or nil end
+      if slot == 1 then return a.princessRaw and toStack(a.princessRaw, "princess") or nil end
+      if slot == 2 then return a.droneRaw and toStack(a.droneRaw, "drone") or nil end
       if a.products and a.products[slot] then return a.products[slot] end
       return nil
     end,
@@ -429,27 +436,39 @@ function M.install(config, sites, opts)
             return child
           end
 
-          -- The queen is CONSUMED and replaced by an offspring princess,
-          -- matching real Forestry -- without this the apiary's princess
-          -- would never change, so no amount of breeding could ever
-          -- improve it (which is exactly what the per-apiary progress %
-          -- caught: it sat pinned at 0% across 60 cycles).
+          -- The queen is CONSUMED (queen slot goes empty), and her
+          -- replacement offspring princess lands in the product/output
+          -- area alongside the drones and combs -- NOT back in the queen
+          -- slot. Confirmed against real hardware via
+          -- probeInventoryBelow(): a spent apiary's queen slot (1) comes
+          -- back completely empty, with the replacement princess sitting
+          -- among slots 3+ like any other harvestable product. Nothing
+          -- re-seeds a new queen automatically -- that's
+          -- bee_keeper_manager.lua's M.runQualitySite's job (see its
+          -- findPrincessCandidate), which this sim needs to actually
+          -- exercise the same as real hardware does.
           --
           -- The replacement princess and the drone offspring are
           -- INDEPENDENT draws from the same mating pair, and nothing gets
           -- to select the princess -- see bee_breeding_test.lua's header
-          -- on that mechanic. Both are computed before princessRaw is
-          -- reassigned, so they all descend from the same parents.
+          -- on that mechanic. All computed before princessRaw is cleared,
+          -- so they all descend from the same parents.
           local newPrincess = makeOffspring()
 
           a.products = a.products or {}
-          for _ = 1, 2 do
-            local productSlot = 7
-            while a.products[productSlot] do productSlot = productSlot + 1 end
-            a.products[productSlot] = toStack(makeOffspring())
+          local nextProductSlot = 3
+          local function addProduct(stack)
+            while a.products[nextProductSlot] do nextProductSlot = nextProductSlot + 1 end
+            a.products[nextProductSlot] = stack
+            nextProductSlot = nextProductSlot + 1
           end
 
-          a.princessRaw = newPrincess
+          addProduct(toStack(newPrincess, "princess"))
+          for _ = 1, 2 do
+            addProduct(toStack(makeOffspring(), "drone"))
+          end
+
+          a.princessRaw = nil
           a.droneRaw = nil
         end
       end
@@ -463,7 +482,7 @@ function M.install(config, sites, opts)
       local newQueen = world.drone.inventory[selected]
       local oldQueenRaw = a.princessRaw
       a.princessRaw = newQueen and newQueen.individual and rawFromIndividual(newQueen.individual) or nil
-      world.drone.inventory[selected] = oldQueenRaw and toStack(oldQueenRaw) or nil
+      world.drone.inventory[selected] = oldQueenRaw and toStack(oldQueenRaw, "princess") or nil
       a.workTicks = 0
       return true
     end,
@@ -475,7 +494,7 @@ function M.install(config, sites, opts)
       local newDrone = world.drone.inventory[selected]
       local oldDroneRaw = a.droneRaw
       a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual) or nil
-      world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw) or nil
+      world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil
       a.workTicks = 0
       return true
     end,

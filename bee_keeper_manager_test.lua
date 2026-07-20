@@ -74,6 +74,15 @@ local function mockBeeStack(active, inactive, isAnalyzed)
   return { name = "forestry:bee", individual = { active = active, inactive = inactive, isAnalyzed = isAnalyzed } }
 end
 
+-- Same, but with a real Forestry princess item name -- M.runQualitySite's
+-- findPrincessCandidate matches on item name (case-insensitive
+-- "princess"/"queen"), so a generic "forestry:bee" stack (mockBeeStack)
+-- deliberately does NOT qualify as a seedable princess.
+local function mockPrincessStack(active, inactive, isAnalyzed)
+  if isAnalyzed == nil then isAnalyzed = true end
+  return { name = "Forestry:beePrincessGE", individual = { active = active, inactive = inactive, isAnalyzed = isAnalyzed } }
+end
+
 local mockComponent = {}
 mockComponent.isAvailable = function(name) return name == "robot" end
 
@@ -232,6 +241,55 @@ do
   check("runQualitySite selected slot 6 (fertility carrier)", world.selectedSlot == 6, "selected=" .. tostring(world.selectedSlot))
   check("runQualitySite actually swapped the drone into the apiary", apiary(DOWN)[2] ~= nil and apiary(DOWN)[2].individual.active.fertility == Cfg.targets.fertility.target)
   check("runQualitySite pulled the weak drone's slot back out (still slot 5 in inventory, untouched)", world.agentInventory[5] ~= nil)
+end
+
+-- ============================================================
+-- Test: runQualitySite seeds a princess from cargo when the apiary's
+-- queen slot is empty -- this is the real-hardware bug where a spent
+-- queen is fully consumed by Forestry (not replaced in slot 1), leaving
+-- traitmax/species sites permanently idle since only the mutation flow
+-- used to ever call swapQueen.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+  -- Apiary queen slot (1) deliberately left empty -- nothing assigned.
+
+  local traitList = M.traitListFor("traitmax")
+  local pActive, pInactive = makeAlleles(traitList, {})
+
+  -- A generic bee (not a princess by name) should NOT be picked...
+  world.agentInventory[4] = mockBeeStack(pActive, pInactive, true)
+  -- ...only this one, a real princess item, should.
+  world.agentInventory[5] = mockPrincessStack(pActive, pInactive, true)
+
+  local config = { workingSlots = { 4, 5 }, minCopies = 2 }
+  local site = { name = "empty-queen-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite seeds a princess instead of reporting no_princess_at_site",
+    status:match("^seeded princess") ~= nil, status)
+  check("runQualitySite selected the actual princess item, not the generic bee",
+    world.selectedSlot == 5, "selected=" .. tostring(world.selectedSlot))
+  check("runQualitySite's swapQueen actually placed her in the apiary's queen slot",
+    apiary(DOWN)[1] ~= nil and apiary(DOWN)[1].name == "Forestry:beePrincessGE")
+end
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+  -- No princess anywhere -- apiary empty AND cargo has none.
+  world.agentInventory[4] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+
+  local config = { workingSlots = { 4 }, minCopies = 2 }
+  local site = { name = "truly-empty-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite reports distinctly when no princess exists anywhere",
+    status == "no_princess_at_site_or_in_cargo", status)
 end
 
 -- ============================================================

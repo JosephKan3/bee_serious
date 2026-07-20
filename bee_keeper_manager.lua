@@ -216,6 +216,25 @@ local function gatherCandidateDrones(config, traitList, targetSpecies)
   return pool
 end
 
+-- Finds an analyzed princess/queen sitting in the agent's own cargo,
+-- for seeding an apiary whose queen slot has gone empty (see the
+-- no-princess branch in M.runQualitySite below for why this is needed at
+-- all). Matched by item name, case-insensitively, since Forestry's own
+-- princess/queen items both work here (a queen is just a mated
+-- princess). Returns the working slot number, or nil if cargo has none.
+local function findPrincessCandidate(config)
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    if stack and stack.name then
+      local lower = stack.name:lower()
+      if (lower:find("princess") or lower:find("queen")) and readIndividual(stack) then
+        return slot
+      end
+    end
+  end
+  return nil
+end
+
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
 -- Returns a short status string for logging.
 function M.runQualitySite(config, site)
@@ -233,7 +252,25 @@ function M.runQualitySite(config, site)
 
   local princessIndividual = M.readSideSlot(down, 1)
   if not princessIndividual then
-    return "no_princess_at_site"
+    -- The apiary's queen slot is empty. This isn't necessarily "never
+    -- had one" -- a spent queen is fully CONSUMED by Forestry once she
+    -- finishes breeding, and her replacement offspring princess lands in
+    -- the product/output area (confirmed via probeInventoryBelow()), NOT
+    -- back in the queen slot. Nothing else in this file ever re-seeds a
+    -- princess for traitmax/species sites (only the mutation flow calls
+    -- swapQueen), so without this, a site goes permanently idle the
+    -- moment its queen runs out.
+    local princessSlot = findPrincessCandidate(config)
+    if not princessSlot then
+      return "no_princess_at_site_or_in_cargo"
+    end
+    Status.setStep("Seeding princess into " .. (site.name or "?"))
+    agent().select(princessSlot)
+    if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+    -- Loading a drone against her happens next cycle, once she's readable
+    -- back out of the apiary (this cycle already consumed the working
+    -- slot she came from).
+    return "seeded princess, will load drone next cycle"
   end
 
   Status.setStep("Evaluating drones for " .. (site.name or "?"))
@@ -465,66 +502,46 @@ function M.harvestSite(config, site, productSlots)
   end
 
   local harvested = 0
-  -- Diagnostic-only bookkeeping (see the print below) -- doesn't affect
-  -- behavior, just makes the next real-hardware run's log tell us exactly
-  -- where harvesting is failing instead of guessing again: is
-  -- productSlots being filtered out entirely by the size guard, does the
-  -- apiary genuinely have nothing in those slots from our own read, or is
-  -- suckFromSlot returning 0 despite a stack being visible there.
-  local seenNonEmpty, suckAttempts, suckFailures = {}, 0, 0
   for _, productSlot in ipairs(productSlots) do
     if not size or productSlot <= size then
+      -- Peeking first isn't just diagnostic -- it avoids burning a
+      -- suckFromSlot call (and a working-slot pick) on a slot we can
+      -- already see is empty.
       local peek = invCtrl().getStackInSlot(down, productSlot)
-      if peek then table.insert(seenNonEmpty, productSlot) end
-      for _, workingSlot in ipairs(config.workingSlots) do
-        if M.readOwnSlot(workingSlot) == nil then
-          if peek then
+      if peek then
+        for _, workingSlot in ipairs(config.workingSlots) do
+          if M.readOwnSlot(workingSlot) == nil then
             -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
             -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
-            -- it does not auto-pick an empty slot on its own. Without
-            -- this, it silently lands in (or fails against) whatever
-            -- slot was selected last, which is why harvesting produced
-            -- nothing on real hardware despite the apiary genuinely
-            -- having product to pull.
+            -- it does not auto-pick an empty slot on its own.
             agent().select(workingSlot)
-            suckAttempts = suckAttempts + 1
             local moved = invCtrl().suckFromSlot(down, productSlot, 1)
-            if moved and moved > 0 then
-              harvested = harvested + 1
-            else
-              suckFailures = suckFailures + 1
-            end
+            if moved and moved > 0 then harvested = harvested + 1 end
+            break
           end
-          break
         end
       end
     end
   end
-  if harvested == 0 and (size or #seenNonEmpty > 0 or suckAttempts > 0) then
-    print(string.format(
-      "[harvest-diag] %s: apiary size=%s, product slots tried=%s, non-empty seen=%s, suck attempts=%d (failed=%d)",
-      site.name or "?", tostring(size), table.concat(productSlots, ","),
-      #seenNonEmpty > 0 and table.concat(seenNonEmpty, ",") or "none",
-      suckAttempts, suckFailures))
 
-    -- Dump EVERY slot (not just the configured productSlots candidates),
-    -- once per site, so the ground truth of where a princess/drone/comb
-    -- actually sits shows up in the log automatically -- no separate
-    -- manual probe step needed. Once-per-site (not every cycle) so a
-    -- persistently-empty apiary doesn't flood the log forever.
-    if size and not diagDumpedSites[site.name] then
-      diagDumpedSites[site.name] = true
-      local dump = { string.format("[harvest-diag-full] %s: dumping all %d slots:", site.name or "?", size) }
-      for slot = 1, size do
-        local stack = invCtrl().getStackInSlot(down, slot)
-        if stack then
-          table.insert(dump, string.format("  slot %d: %s x%s (%s)",
-            slot, tostring(stack.name), tostring(stack.size), tostring(stack.label)))
-        end
+  -- One-time-per-site full slot dump if harvesting ever comes up empty
+  -- despite the apiary genuinely having a real size -- catches a future
+  -- "productSlots doesn't match this apiary" regression the same way
+  -- probeInventoryBelow() caught it manually before this existed, without
+  -- needing a manual probe step or flooding the log on every normal
+  -- "nothing ready yet" cycle.
+  if harvested == 0 and size and not diagDumpedSites[site.name] then
+    diagDumpedSites[site.name] = true
+    local dump = { string.format("[harvest-diag-full] %s: dumping all %d slots:", site.name or "?", size) }
+    for slot = 1, size do
+      local stack = invCtrl().getStackInSlot(down, slot)
+      if stack then
+        table.insert(dump, string.format("  slot %d: %s x%s (%s)",
+          slot, tostring(stack.name), tostring(stack.size), tostring(stack.label)))
       end
-      if #dump == 1 then table.insert(dump, "  (every slot reported empty)") end
-      print(table.concat(dump, "\n"))
     end
+    if #dump == 1 then table.insert(dump, "  (every slot reported empty)") end
+    print(table.concat(dump, "\n"))
   end
   return harvested
 end
