@@ -317,6 +317,26 @@ end
 --     toDiscard = { <bee>, <bee>, ... },
 --   }
 --
+-- Overall genetic strength across every tracked trait -- GG worth more
+-- than Gb, bb worth nothing, optionally weighted the same way scoreDrone
+-- is. Used only to ORDER the bank/discard pass below (see its notes),
+-- not to pick a princess/drone pairing -- that's selectBestDrone's job,
+-- which cares about complementing a SPECIFIC princess, not overall
+-- strength in the abstract.
+local function droneStrength(traitList, genotype, traitWeights)
+  local strength = 0
+  for _, trait in ipairs(traitList) do
+    local weight = (traitWeights and traitWeights[trait]) or 1
+    local state = traitState(genotype, trait)
+    if state == "GG" then
+      strength = strength + 2 * weight
+    elseif state == "Gb" then
+      strength = strength + weight
+    end
+  end
+  return strength
+end
+
 -- minCopies: optional, forwarded to shouldBank (default 2 -- see its docs).
 -- traitWeights: optional, forwarded to selectBestDrone/scoreDrone (see
 --               scoreDrone's docs -- this is where you'd pass e.g.
@@ -337,7 +357,25 @@ function M.planGeneration(traitList, princessGenotype, dronePool, bankedDrones, 
   local runningBank = {}
   for _, d in ipairs(bankedDrones) do table.insert(runningBank, d) end
 
-  for _, drone in ipairs(dronePool) do
+  -- Process STRONGEST drones first, not whatever order the caller's
+  -- cargo scan happened to produce. shouldBank's insurance tally treats
+  -- Gb and GG as equally valid coverage for a trait -- without a stable,
+  -- quality-driven order, whichever drone is merely scanned FIRST claims
+  -- that trait's insurance slot. If that's a weak Gb copy, a genuinely
+  -- BETTER GG duplicate processed later looks "redundant" and gets
+  -- discarded, leaving the weaker one banked instead -- confirmed via a
+  -- direct repro: reversing scan order alone flipped which of two
+  -- otherwise-identical-except-for-strength drones got kept. Sorting
+  -- strongest-first means a scarce trait's insurance slot is always
+  -- claimed by the best available copy, so only genuinely redundant
+  -- (equal-or-weaker) duplicates ever get discarded.
+  local orderedPool = {}
+  for _, d in ipairs(dronePool) do table.insert(orderedPool, d) end
+  table.sort(orderedPool, function(a, b)
+    return droneStrength(traitList, a.genotype, traitWeights) > droneStrength(traitList, b.genotype, traitWeights)
+  end)
+
+  for _, drone in ipairs(orderedPool) do
     if best and drone.id == best.id then
       -- will be consumed in breeding, not a bank/discard decision
     else

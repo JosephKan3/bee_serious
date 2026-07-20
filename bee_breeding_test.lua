@@ -41,6 +41,46 @@
 local BB = require("bee_breeding")
 
 -- ============================================================
+-- Regression: planGeneration must bank/discard by QUALITY, not scan
+-- order. shouldBank's insurance tally treats Gb and GG as equally valid
+-- coverage for a trait -- without a stable, strength-driven order,
+-- whichever drone happens to be scanned first claims that trait's
+-- insurance slot. If that's a weak Gb copy, a genuinely BETTER GG
+-- duplicate scanned later looks "redundant" and gets discarded while the
+-- weaker one stays banked -- confirmed via real-hardware/sim
+-- observation: worse drones staying while better ones got flown to
+-- trash. Checked in BOTH scan orders -- the outcome must not depend on
+-- which one happens to come first.
+-- ============================================================
+
+do
+  local traitList = { "fertility" }
+  local princess = { fertility = { active = "bad", inactive = "bad" } }
+  local weak = { id = "weak_Gb", genotype = { fertility = { active = "good", inactive = "bad" } } }
+  local strong = { id = "strong_GG", genotype = { fertility = { active = "good", inactive = "good" } } }
+  -- A third drone that's always the best pairing for this princess (also
+  -- GG), so it's always the one bred/consumed -- isolating weak/strong as
+  -- the two REMAINING bank-or-discard candidates regardless of order.
+  local best = { id = "best", genotype = { fertility = { active = "good", inactive = "good" } } }
+
+  local function idsIn(list)
+    local ids = {}
+    for _, entry in ipairs(list) do ids[entry.drone.id] = true end
+    return ids
+  end
+
+  for _, pool in ipairs({ { best, weak, strong }, { best, strong, weak } }) do
+    local plan = BB.planGeneration(traitList, princess, pool, {}, false, 1, nil)
+    local banked, discarded = idsIn(plan.toBank), idsIn(plan.toDiscard)
+    assert(banked.strong_GG and not banked.weak_Gb,
+      "planGeneration must keep the stronger GG drone, not the weaker Gb one, regardless of scan order")
+    assert(discarded.weak_Gb and not discarded.strong_GG,
+      "planGeneration must discard the weaker Gb duplicate, not the stronger GG one")
+  end
+  print("OK   planGeneration banks/discards by drone strength, not scan order")
+end
+
+-- ============================================================
 -- Genetics engine
 -- ============================================================
 
