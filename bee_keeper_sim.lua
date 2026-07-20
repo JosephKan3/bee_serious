@@ -358,10 +358,18 @@ function M.newWorld(config, sites)
     },
     apiaries = {}, -- key "x:z" -> { princessRaw, droneRaw, workTicks, workNeeded }
     storage = {},
-    -- uid of the drone bee most recently moved (loaded into an apiary or
-    -- discarded), so the verbose dump can flash its item name cyan for
-    -- exactly one redraw -- see formatStackSegments/M.dumpWorld below.
+    -- uid + stepCounter snapshot of the drone bee most recently moved
+    -- (loaded into an apiary or discarded), so the verbose dump can flash
+    -- its item name cyan for the ENTIRE task/step it becomes visible in
+    -- (not just a single redraw) -- see M.tickStep/formatStackSegments
+    -- below. stepCounter increments once per Status.onChange (one whole
+    -- task), driven from outside by M.tickStep -- NOT per Nav.onStep
+    -- block-move, so a multi-block walk redraws with the flash held
+    -- steady the whole time instead of it vanishing after the first
+    -- block.
     recentlyMovedDroneUid = nil,
+    recentlyMovedDroneStep = nil,
+    stepCounter = 0,
     mutationRecipes = {
       -- A generous chance so a local demo run actually shows a mutation
       -- succeed within a reasonable number of cycles.
@@ -464,6 +472,15 @@ function M.install(config, sites, opts)
   local function atPos(px, pz) return px ~= nil and world.drone.x == px and world.drone.z == pz end
   local function atStorage() return config.storagePos and atPos(config.storagePos.x, config.storagePos.z) end
   local function atTrash() return config.trashPos and atPos(config.trashPos.x, config.trashPos.z) end
+
+  -- Stamps world.recentlyMovedDroneUid/Step together (always as a pair --
+  -- see M.tickStep/formatStackSegments for how the step snapshot decides
+  -- how long the cyan flash stays visible).
+  local function markDroneMoved(stack)
+    if not isDroneStack(stack) then return end
+    world.recentlyMovedDroneUid = stack._uid
+    world.recentlyMovedDroneStep = world.stepCounter
+  end
 
   -- Apiary slot layout (always 12 total): 1=princess, 2=drone (each ONLY
   -- ever holding their own type -- see swapQueen/swapDrone below), 3-5=
@@ -640,7 +657,7 @@ function M.install(config, sites, opts)
       if atTrash() then
         if slot ~= 1 then return false end
         world.drone.inventory[selected] = nil
-        if isDroneStack(stack) then world.recentlyMovedDroneUid = stack._uid end
+        markDroneMoved(stack)
         return true
       end
 
@@ -650,7 +667,7 @@ function M.install(config, sites, opts)
         if moved <= 0 then return false end
         stack.size = (stack.size or 1) - moved
         if stack.size <= 0 then world.drone.inventory[selected] = nil end
-        if isDroneStack(stack) then world.recentlyMovedDroneUid = stack._uid end
+        markDroneMoved(stack)
         return true
       end
 
@@ -787,7 +804,7 @@ function M.install(config, sites, opts)
       a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual, newDrone._uid) or nil
       world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil
       a.workTicks = 0
-      if newDrone then world.recentlyMovedDroneUid = newDrone._uid end
+      if newDrone then markDroneMoved(newDrone) end
       return true
     end,
     -- Consumes 1 honey/honeydew from honeySlot (real Forestry: analyzing
@@ -949,19 +966,18 @@ local function formatStackSegments(stack, showTraits)
   if not stack then return { { text = "empty", color = COLOR_DEFAULT } } end
 
   -- Princess pink and allele green/red (see traitSegments) always take
-  -- priority -- this only ever affects a plain drone's own name color, and
-  -- only for the one redraw right after it was actually moved (loaded
-  -- into an apiary or discarded); see world.recentlyMovedDroneUid.
+  -- priority -- this only ever affects a plain drone's own name color.
+  -- Held cyan for the ENTIRE step during which the move becomes visible
+  -- (stepCounter advanced by exactly 1 since the move), not just a single
+  -- redraw -- see M.tickStep/world.recentlyMovedDroneStep.
   local nameColor = COLOR_DEFAULT
   if isPrincessOrQueenStack(stack) then
     nameColor = COLOR_PRINCESS
   elseif isDroneStack(stack) then
     local world = M.world
-    if stack._uid and world and stack._uid == world.recentlyMovedDroneUid then
-      nameColor = COLOR_DRONE_MOVED
-    else
-      nameColor = COLOR_DRONE
-    end
+    local recentlyMoved = world and stack._uid and stack._uid == world.recentlyMovedDroneUid
+      and world.recentlyMovedDroneStep and (world.stepCounter - world.recentlyMovedDroneStep) <= 1
+    nameColor = recentlyMoved and COLOR_DRONE_MOVED or COLOR_DRONE
   end
 
   local segments = { { text = stack.name, color = nameColor } }
@@ -1085,10 +1101,16 @@ function M.dumpWorld(sink, sites)
     end
     sink(line(""))
   end
+end
 
-  -- "Momentarily" cyan: shown for exactly this one dump, then reverts --
-  -- see world.recentlyMovedDroneUid and formatStackSegments above.
-  world.recentlyMovedDroneUid = nil
+-- Advances the step counter the cyan "drone just moved" flash is timed
+-- against (see world.recentlyMovedDroneStep/formatStackSegments). Call
+-- this exactly once per NEW task/step (i.e. from Status.onChange), NOT
+-- per Nav.onStep block-move -- so a multi-block walk redraws with the
+-- flash held steady for its entire duration instead of it decaying
+-- after the first block.
+function M.tickStep()
+  if M.world then M.world.stepCounter = M.world.stepCounter + 1 end
 end
 
 return M

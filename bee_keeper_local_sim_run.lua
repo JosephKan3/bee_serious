@@ -239,6 +239,10 @@ if uiEnabled then
     end
   end
   Status.onChange = function()
+    -- Once per NEW task -- see Sim.tickStep's header notes -- keeps the
+    -- verbose dump's cyan "drone just moved" flash held steady for this
+    -- task's entire duration instead of it decaying after one redraw.
+    Sim.tickStep()
     draw()
     Sim.realSleep(Sim.secondsPerAction)
     checkControl()
@@ -257,6 +261,7 @@ if uiEnabled then
   end
 else
   Status.onChange = function()
+    Sim.tickStep()
     print("  [" .. Status.get().step .. "]")
     Sim.realSleep(Sim.secondsPerAction)
     checkControl()
