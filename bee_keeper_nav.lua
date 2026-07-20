@@ -39,6 +39,10 @@ local function computer() return require("computer") end
 
 local pos = { x = 0, z = 0 }  -- exact position relative to home
 local homePos = { x = 0, z = 0 }
+local homeSet = false  -- whether Nav.setHome has been called yet -- tracked
+                        -- separately from `y` since nil is a legitimate
+                        -- altitude value (setHome(nil): "wherever the robot
+                        -- currently is, don't bother tracking Y explicitly")
 local y = nil  -- the fixed flight altitude; set via Nav.setHome/setAltitude
 
 -- Internal facing convention, purely for computing turn deltas -- doesn't
@@ -63,13 +67,20 @@ function M.setHome(altitude)
   homePos = { x = 0, z = 0 }
   facing = 1
   y = altitude
+  homeSet = true
 end
 
 -- Explicit altitude change (the one deliberate exception to "Y is
 -- fixed"). dy is a relative offset, same semantics as gotoXZ's target.
+-- Requires an actual known altitude (i.e. Nav.setHome was called with a
+-- real number, not nil) since there's no starting value to offset from
+-- otherwise.
 function M.setAltitude(newY)
-  if y == nil then
+  if not homeSet then
     error("Nav.setHome must be called before setAltitude")
+  end
+  if y == nil then
+    error("Nav.setAltitude needs a known starting altitude -- Nav.setHome was called with altitude=nil")
   end
   local dy = newY - y
   local step = dy > 0 and robot().up or robot().down
@@ -130,7 +141,7 @@ end
 -- stuck partway (position is updated to reflect exactly how far it
 -- actually got, not silently left wrong).
 function M.gotoXZ(targetX, targetZ)
-  if y == nil then
+  if not homeSet then
     error("Nav.setHome must be called before gotoXZ")
   end
 

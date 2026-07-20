@@ -177,6 +177,26 @@ do
 end
 
 -- ============================================================
+-- Test: setHome(nil) -- "lock to wherever the robot currently is, don't
+-- bother tracking an actual altitude" -- must NOT be mistaken for
+-- "setHome was never called". This is exactly what
+-- bee_keeper_setup.lua's M.run does, and broke gotoXZ on real hardware
+-- (nil altitude was misread as "uninitialized").
+-- ============================================================
+
+do
+  resetRobot()
+  Nav.setHome(nil)
+  local ok = Nav.gotoXZ(3, 2)
+  check("gotoXZ works fine after setHome(nil)", ok == true)
+  check("getAltitude stays nil (never tracked, never required)", Nav.getAltitude() == nil)
+
+  local pcallOk = pcall(Nav.setAltitude, 80)
+  check("setAltitude errors cleanly with no starting altitude to offset from",
+    pcallOk == false, "should have errored, got ok=" .. tostring(pcallOk))
+end
+
+-- ============================================================
 -- Test: orderByProximity does nearest-neighbor ordering from current pos
 -- ============================================================
 
