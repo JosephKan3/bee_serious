@@ -199,6 +199,13 @@ mockComponent.bee_housing = {
 
 package.loaded["component"] = mockComponent
 
+-- The "robot" LIBRARY, not component.robot -- inventorySize() (own
+-- inventory total slot count) lives here, confirmed on real hardware to
+-- require this split the same way movement did (see bee_keeper_nav.lua).
+package.loaded["robot"] = {
+  inventorySize = function() return world.robotInventorySize or 15 end,
+}
+
 -- ============================================================
 -- Load the real module under test against these fakes
 -- ============================================================

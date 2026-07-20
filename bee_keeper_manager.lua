@@ -101,6 +101,16 @@ local function agent()
   return c.drone
 end
 
+-- The "robot" LIBRARY (require("robot")), not component.robot -- needed
+-- for inventorySize(), which reports the agent's OWN total slot count.
+-- inventory_controller.getInventorySize(side) is for EXTERNAL
+-- inventories and REQUIRES a side argument -- confirmed on real hardware
+-- ("bad arguments #1 (integer expected, got no value)") when called with
+-- none, which is what querying "my own size" would need. Same
+-- library-vs-component split bee_keeper_nav.lua already established for
+-- movement.
+local function robotLib() return require("robot") end
+
 -- ============================================================
 -- Genome reading
 -- ============================================================
@@ -762,7 +772,7 @@ end
 -- different item name than expected -- better to try the configured
 -- slot than analyze nothing at all).
 local function findHoneySlot(config)
-  local size = invCtrl().getInventorySize() or 16
+  local size = robotLib().inventorySize() or 16
   for slot = 1, size do
     local stack = invCtrl().getStackInInternalSlot(slot)
     if stack and stack.name then
@@ -804,7 +814,7 @@ end
 
 function M.resolveWorkingSlots(config)
   if config.workingSlots then return config.workingSlots end
-  local size = invCtrl().getInventorySize() or 16
+  local size = robotLib().inventorySize() or 16
   local slots = {}
   for slot = 1, size do
     if slot ~= config.honeySlot then table.insert(slots, slot) end
