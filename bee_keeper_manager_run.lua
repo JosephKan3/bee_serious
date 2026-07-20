@@ -108,6 +108,7 @@ local function main(args)
   config.sites = M.loadSites(saved.sites, config.siteOverrides)
   config.storagePos = config.storagePos or saved.storagePos
   config.trashPos = config.trashPos or saved.trashPos
+  config.workingSlots = M.resolveWorkingSlots(config)
 
   if uiEnabled then
     local UI = require("bee_keeper_ui")

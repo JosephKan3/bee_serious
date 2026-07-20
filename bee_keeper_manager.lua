@@ -709,18 +709,65 @@ end
 -- Analysis: find unanalyzed bees in working slots and analyze them
 -- ============================================================
 
+-- Finds honey/honeydew wherever it actually is in the agent's own
+-- inventory, rather than assuming it's permanently sitting in
+-- config.honeySlot. Searches the WHOLE inventory (not just
+-- workingSlots, which deliberately excludes honeySlot by convention) --
+-- if that fixed slot ever runs dry, or honey gets restocked into a
+-- different slot, the old fixed-slot behavior would just silently keep
+-- failing to analyze anything with no way to recover. Falls back to
+-- config.honeySlot if nothing matches (e.g. real hardware reports a
+-- different item name than expected -- better to try the configured
+-- slot than analyze nothing at all).
+local function findHoneySlot(config)
+  local size = invCtrl().getInventorySize() or 16
+  for slot = 1, size do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    if stack and stack.name then
+      local lower = stack.name:lower()
+      if lower:find("honey") or lower:find("honeydew") then
+        return slot
+      end
+    end
+  end
+  return config.honeySlot
+end
+
 function M.analyzeWorkingSlots(config)
   local analyzed = 0
+  local honeySlot = findHoneySlot(config)
+  if not honeySlot then return 0 end
+
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
     if stack and stack.individual and not stack.individual.isAnalyzed then
       Status.setStep("Analyzing bee in slot " .. slot)
       agent().select(slot)
-      local ok = beekeeper().analyze(config.honeySlot)
+      local ok = beekeeper().analyze(honeySlot)
       if ok then analyzed = analyzed + 1 end
     end
   end
   return analyzed
+end
+
+-- ============================================================
+-- Working slots: if config.workingSlots isn't explicitly set, use every
+-- slot from 1 to the robot's REAL inventory size except honeySlot,
+-- instead of a fixed hardcoded list. A fixed list (e.g. hardcoded to 16)
+-- silently wastes any additional Inventory Upgrade slots the robot
+-- actually has installed -- call this once at startup (see
+-- bee_keeper_manager_run.lua) and assign the result back into
+-- config.workingSlots.
+-- ============================================================
+
+function M.resolveWorkingSlots(config)
+  if config.workingSlots then return config.workingSlots end
+  local size = invCtrl().getInventorySize() or 16
+  local slots = {}
+  for slot = 1, size do
+    if slot ~= config.honeySlot then table.insert(slots, slot) end
+  end
+  return slots
 end
 
 -- ============================================================

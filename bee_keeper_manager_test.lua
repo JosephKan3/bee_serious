@@ -186,6 +186,7 @@ mockComponent.beekeeper = {
   end,
   analyze = function(honeySlot)
     world.analyzeCalls = world.analyzeCalls + 1
+    world.lastHoneySlotUsed = honeySlot
     local stack = world.agentInventory[world.selectedSlot]
     if stack and stack.individual then stack.individual.isAnalyzed = true end
     return true
@@ -518,6 +519,66 @@ do
   local analyzed = M.analyzeWorkingSlots(config)
   check("analyzeWorkingSlots analyzes exactly the unanalyzed one", analyzed == 1, "analyzed=" .. tostring(analyzed))
   check("analyzeWorkingSlots left the already-analyzed one alone (1 total call)", world.analyzeCalls == 1)
+end
+
+-- ============================================================
+-- Test: analyzeWorkingSlots finds honey dynamically wherever it actually
+-- is, instead of assuming it's permanently in config.honeySlot -- if
+-- honey gets restocked into a different slot, the old fixed-slot
+-- behavior would silently keep failing to analyze anything.
+-- ============================================================
+
+do
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.lastHoneySlotUsed = nil
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false) -- unanalyzed
+  -- Honey is sitting in slot 15, NOT config.honeySlot (which points at an
+  -- empty slot -- simulating it having been restocked somewhere else).
+  world.agentInventory[15] = { name = "forestry:honey_drop", size = 64 }
+
+  local config = { workingSlots = { 1 }, honeySlot = 20 }
+  M.analyzeWorkingSlots(config)
+  check("analyzeWorkingSlots finds honey by searching, not just config.honeySlot",
+    world.lastHoneySlotUsed == 15, "used=" .. tostring(world.lastHoneySlotUsed))
+end
+
+do
+  -- No honey anywhere -- falls back to config.honeySlot rather than
+  -- crashing or silently doing nothing useful to diagnose.
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.lastHoneySlotUsed = nil
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+
+  local config = { workingSlots = { 1 }, honeySlot = 20 }
+  M.analyzeWorkingSlots(config)
+  check("analyzeWorkingSlots falls back to config.honeySlot when nothing matches",
+    world.lastHoneySlotUsed == 20, "used=" .. tostring(world.lastHoneySlotUsed))
+end
+
+-- ============================================================
+-- Test: resolveWorkingSlots auto-derives from the robot's real inventory
+-- size (mocked at 15 -- see getInventorySize above) when
+-- config.workingSlots isn't explicitly set, instead of a fixed hardcoded
+-- list that wastes any extra Inventory Upgrade slots the robot has.
+-- ============================================================
+
+do
+  local config = { honeySlot = 1 }
+  local slots = M.resolveWorkingSlots(config)
+  check("resolveWorkingSlots uses every slot up to the real inventory size (15)",
+    #slots == 14, "count=" .. #slots) -- 15 total minus honeySlot
+  local hasHoney = false
+  for _, s in ipairs(slots) do if s == 1 then hasHoney = true end end
+  check("resolveWorkingSlots excludes honeySlot", not hasHoney)
+end
+
+do
+  local explicit = { 5, 6, 7 }
+  local config = { honeySlot = 1, workingSlots = explicit }
+  check("resolveWorkingSlots leaves an explicit list untouched",
+    M.resolveWorkingSlots(config) == explicit)
 end
 
 -- ============================================================

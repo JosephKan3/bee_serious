@@ -87,6 +87,12 @@ end
 
 config.storagePos = config.storagePos or { x = -6, z = -6 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
+-- Real hardware auto-derives this from getInventorySize() (see
+-- M.resolveWorkingSlots), but that needs component.inventory_controller
+-- mocked, which only happens AFTER Sim.install below -- and Sim.install
+-- itself needs config.workingSlots already set to seed demo cargo. No
+-- real inventory to query here anyway, so just keep a fixed demo list.
+config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 
 -- Must install the fakes BEFORE anything requires component/sides/computer
 -- for the first time (require caches on first load).

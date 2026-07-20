@@ -16,8 +16,13 @@ return {
   honeySlot = 1,
 
   -- Slots used as the live candidate-bee pool (the agent's own cargo).
-  -- Keep honeySlot and any equipment slots out of this list.
-  workingSlots = { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+  -- Leave nil -- M.resolveWorkingSlots auto-derives this as "every slot
+  -- from 1 to the robot's real inventory size except honeySlot" via
+  -- getInventorySize(), so it actually uses every slot an Inventory
+  -- Upgrade gives you instead of a fixed guess. Only set this list
+  -- explicitly if you need to reserve additional slots (equipment, etc.)
+  -- beyond just honeySlot.
+  workingSlots = nil,
 
   -- Where an apiary's offspring/product output (combs, drones, the
   -- replacement princess) lives. Leave nil -- M.harvestSite auto-derives
