@@ -382,13 +382,31 @@ function M.runQualitySite(config, site)
     return seededThisVisit and "seeded princess (no viable drone yet)" or "no_viable_drone"
   end
 
+  -- Load the winning drone FIRST, while still standing right at the site
+  -- -- no reason to make discarding the losers a detour in between
+  -- deciding and actually finishing the setup. Discarding is handled
+  -- afterward instead (see below): it doesn't need the winner loaded
+  -- first, and putting it after means this apiary is fully set up
+  -- (princess + drone both in) before the robot goes anywhere else, same
+  -- principle as the earlier fix that stopped it seeding a princess and
+  -- wandering off before loading a drone at all.
+  Status.setStep("Loading drone into " .. (site.name or "?"))
+  local droneSlot = ensureSingleItemSlot(config, plan.breedWith._slot)
+  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(droneSlot)
+  local swapped = beekeeper().swapDrone(down)
+  if not swapped then return "swap_drone_failed" end
+
   -- Discard drones the plan doesn't want, to make room. Default behavior:
   -- fly them to config.trashPos (permanently voided -- see M.dumpToTrash)
   -- if known, else config.storagePos (see M.dumpToStorage) -- trash is
   -- preferred when both are known, since a breeding program generates a
   -- steady stream of unwanted drones that would otherwise slowly fill up
   -- a finite storage chest. Override config.onDiscard to route elsewhere
-  -- entirely (sampler/furnace/junk).
+  -- entirely (sampler/furnace/junk). No trip back to the site afterward
+  -- needed -- the apiary is already fully loaded, and wherever this
+  -- discard trip ends is a perfectly fine place to start the next site's
+  -- travel from.
   local discardCount = 0
   for _, entry in ipairs(plan.toDiscard) do
     if entry.drone.id ~= plan.breedWith.id then
@@ -404,20 +422,7 @@ function M.runQualitySite(config, site)
     else
       M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
     end
-    -- flew away to drop off discards -- come back before finishing the
-    -- swap below, or it lands on the storage/trash position instead of
-    -- the apiary (caught by the local simulator: swapDrone would fail
-    -- there since there's no apiary at that position).
-    local backOk, backReason = gotoSite(site)
-    if not backOk then return "nav_failed_returning_from_discard:" .. tostring(backReason) end
   end
-
-  Status.setStep("Loading drone into " .. (site.name or "?"))
-  local droneSlot = ensureSingleItemSlot(config, plan.breedWith._slot)
-  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
-  agent().select(droneSlot)
-  local swapped = beekeeper().swapDrone(down)
-  if not swapped then return "swap_drone_failed" end
 
   return string.format("%sloaded drone (score %.1f)", seededThisVisit and "seeded princess + " or "", plan.score)
 end
