@@ -882,41 +882,88 @@ local TRAIT_ABBR = {
   caveDwelling = "cave",
 }
 
--- Short trait-state summary (GG/Gb/bG/bb per active/meaningful trait --
--- excludes "any"-kind traits like effect/territory/speed, which don't
--- have a meaningful good/bad state to show) for an ANALYZED bee. Returns
--- nil for an unanalyzed one -- formatStack shows "(unidentified)"
--- instead, matching real Forestry: you can't see a bee's traits until
--- you identify it with honey.
-local function traitSummary(individual)
-  if not individual.isAnalyzed then return nil end
-  local traits = Cfg.activeTraits()
-  local genotype = Cfg.normalizeGenotype(traits, individual.active, individual.inactive, nil)
-  local parts = {}
-  for _, trait in ipairs(traits) do
-    table.insert(parts, (TRAIT_ABBR[trait] or trait) .. "=" .. BB.traitState(genotype, trait))
+local COLOR_DEFAULT = 0xE0E0E0
+local COLOR_PRINCESS = 0xFF69B4 -- pink
+local COLOR_DRONE = 0xFFA030 -- orange
+local COLOR_GOOD = 0x00E000 -- green, matches the "good" allele
+local COLOR_BAD = 0xE00000 -- red, matches the "bad" allele
+
+-- A line is an ARRAY of { text=, color= } segments, not a plain string --
+-- lets each allele letter (see traitSegments below) and the
+-- princess/drone item name get its own color instead of one flat color
+-- per line. line(...) takes any number of (text, color) pairs and
+-- assembles them into one such line for readability at each call site.
+local function line(...)
+  local args = { ... }
+  local segments = {}
+  for i = 1, #args, 2 do
+    table.insert(segments, { text = args[i], color = args[i + 1] or COLOR_DEFAULT })
   end
-  return table.concat(parts, ",")
+  return segments
 end
 
--- showTraits: pass true to append the concise trait-state summary (or
--- "(unidentified)" if the bee hasn't been analyzed yet) -- per your
--- call, this is shown for cargo/storage always, and for an apiary's
--- princess/drone specifically, but NOT its output slots.
-local function formatStack(stack, showTraits)
-  if not stack then return "empty" end
+-- Appends every segment of `more` onto `segments` in place.
+local function append(segments, more)
+  for _, seg in ipairs(more) do table.insert(segments, seg) end
+  return segments
+end
+
+-- GG/Gb/bG/bb per active/meaningful trait (excludes "any"-kind traits
+-- like effect/territory/speed, which don't have a meaningful good/bad
+-- state to show), each allele letter individually colored green (good)
+-- or red (bad). Returns a single segment saying "unidentified" for an
+-- unanalyzed bee -- matches real Forestry: you can't see a bee's traits
+-- until you identify it with honey.
+local function traitSegments(individual)
+  if not individual.isAnalyzed then
+    return { { text = "unidentified", color = COLOR_DEFAULT } }
+  end
+  local traits = Cfg.activeTraits()
+  local genotype = Cfg.normalizeGenotype(traits, individual.active, individual.inactive, nil)
+  local segments = {}
+  for i, trait in ipairs(traits) do
+    if i > 1 then table.insert(segments, { text = ",", color = COLOR_DEFAULT }) end
+    table.insert(segments, { text = (TRAIT_ABBR[trait] or trait) .. "=", color = COLOR_DEFAULT })
+    local state = BB.traitState(genotype, trait) -- e.g. "GG", "Gb", "bG", "bb"
+    for allele in state:gmatch(".") do
+      table.insert(segments, { text = allele, color = (allele == "G") and COLOR_GOOD or COLOR_BAD })
+    end
+  end
+  return segments
+end
+
+-- showTraits: pass true to append the trait-state summary (see
+-- traitSegments) -- per your call, shown for cargo/storage always, and
+-- for an apiary's princess/drone specifically, but NOT its output slots.
+-- The item name itself is colored pink for a princess/queen, orange for
+-- a drone.
+local function formatStackSegments(stack, showTraits)
+  if not stack then return { { text = "empty", color = COLOR_DEFAULT } } end
+
+  local nameColor = COLOR_DEFAULT
+  if isPrincessOrQueenStack(stack) then nameColor = COLOR_PRINCESS
+  elseif isDroneStack(stack) then nameColor = COLOR_DRONE end
+
+  local segments = { { text = stack.name, color = nameColor } }
+
   if stack.individual then
     local species = stack.individual.active and stack.individual.active.species
     local speciesName = species and Cfg.speciesKey(species) or "?"
     local uidStr = stack._uid and (" [uid=" .. stack._uid .. "]") or ""
-    local base = string.format("%s x%s (%s)%s", stack.name, tostring(stack.size or 1), speciesName, uidStr)
+    table.insert(segments, {
+      text = string.format(" x%s (%s)%s", tostring(stack.size or 1), speciesName, uidStr),
+      color = COLOR_DEFAULT,
+    })
     if showTraits then
-      local summary = traitSummary(stack.individual)
-      base = base .. " {" .. (summary or "unidentified") .. "}"
+      table.insert(segments, { text = " {", color = COLOR_DEFAULT })
+      append(segments, traitSegments(stack.individual))
+      table.insert(segments, { text = "}", color = COLOR_DEFAULT })
     end
-    return base
+  else
+    table.insert(segments, { text = string.format(" x%s", tostring(stack.size or 1)), color = COLOR_DEFAULT })
   end
-  return string.format("%s x%s", stack.name, tostring(stack.size or 1))
+
+  return segments
 end
 
 local function sortedKeys(t)
@@ -924,6 +971,21 @@ local function sortedKeys(t)
   for k in pairs(t) do table.insert(keys, k) end
   table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
   return keys
+end
+
+-- Renders one line's segments as 24-bit ANSI true color -- the default
+-- sink (console/log use). bee_keeper_local_sim_run.lua's "ui" mode
+-- passes a different sink that paints each segment at an absolute gpu
+-- position instead.
+local function ansiPrintSink(segments)
+  local parts = {}
+  for _, seg in ipairs(segments) do
+    local r = (seg.color >> 16) & 0xFF
+    local g = (seg.color >> 8) & 0xFF
+    local b = seg.color & 0xFF
+    table.insert(parts, string.format("\27[38;2;%d;%d;%dm%s", r, g, b, seg.text))
+  end
+  print(table.concat(parts) .. "\27[0m")
 end
 
 -- Dumps EVERYTHING in the simulated world -- the agent's own
@@ -935,48 +997,61 @@ end
 -- below it). Meant to be called from bee_keeper_local_sim_run.lua's
 -- "verbose" flag.
 --
--- sink defaults to print (console/log use), but accepts any
--- function(line) -- bee_keeper_local_sim_run.lua's "ui" mode passes one
--- that writes each line to an absolute gpu position instead, so verbose
--- output can be part of the live dashboard, not separate scrolling text
--- that would corrupt its fixed-position redraws.
+-- sink defaults to ansiPrintSink (console/log use), but accepts any
+-- function(segments) -- segments is an array of { text=, color= }, not a
+-- plain string, so callers can paint each piece (allele letters,
+-- princess/drone names) in its own color. bee_keeper_local_sim_run.lua's
+-- "ui" mode passes one that writes each segment to an absolute gpu
+-- position instead, so verbose output can be part of the live
+-- dashboard, not separate scrolling text that would corrupt its
+-- fixed-position redraws.
 function M.dumpWorld(sink)
-  sink = sink or print
+  sink = sink or ansiPrintSink
   local world = M.world
   if not world then return end
 
-  sink(string.format("--- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
+  sink(line(string.format("--- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
     world.drone.x, world.drone.z, world.drone.facing, (world.drone.energy or 0) * 100,
-    tostring(world.drone._selected)))
+    tostring(world.drone._selected))))
+  sink(line(""))
 
-  sink("--- cargo ---")
+  sink(line("--- cargo ---"))
   local cargoSlots = sortedKeys(world.drone.inventory)
-  if #cargoSlots == 0 then sink("  (empty)") end
+  if #cargoSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(cargoSlots) do
-    sink(string.format("  slot %d: %s", slot, formatStack(world.drone.inventory[slot], true)))
+    sink(append(line(string.format("  slot %d: ", slot)), formatStackSegments(world.drone.inventory[slot], true)))
   end
+  sink(line(""))
+  sink(line(""))
 
-  sink("--- storage ---")
+  sink(line("--- storage ---"))
   local storageSlots = sortedKeys(world.storage)
-  if #storageSlots == 0 then sink("  (empty)") end
+  if #storageSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(storageSlots) do
-    sink(string.format("  slot %d: %s", slot, formatStack(world.storage[slot], true)))
+    sink(append(line(string.format("  slot %d: ", slot)), formatStackSegments(world.storage[slot], true)))
   end
+  sink(line(""))
+  sink(line(""))
 
-  sink("--- apiaries ---")
+  sink(line("--- apiaries ---"))
+  local apiaryNumber = 0
   for _, key in ipairs(sortedKeys(world.apiaries)) do
+    apiaryNumber = apiaryNumber + 1
     local a = world.apiaries[key]
-    sink(string.format("  apiary @ (%s) -- work %d/%d:", key, a.workTicks, a.workNeeded))
-    sink("    slot 1 (princess): " .. (a.princessRaw and formatStack(toStack(a.princessRaw, "princess"), true) or "empty"))
-    sink("    slot 2 (drone): " .. (a.droneRaw and formatStack(toStack(a.droneRaw, "drone"), true) or "empty"))
+    sink(line(string.format("  apiary #%d @ (%s) -- work %d/%d:", apiaryNumber, key, a.workTicks, a.workNeeded)))
+    sink(append(line("    slot 1 (princess): "),
+      a.princessRaw and formatStackSegments(toStack(a.princessRaw, "princess"), true) or line("empty")))
+    sink(append(line("    slot 2 (drone): "),
+      a.droneRaw and formatStackSegments(toStack(a.droneRaw, "drone"), true) or line("empty")))
     local productSlots = sortedKeys(a.products or {})
     if #productSlots == 0 then
-      sink("    outputs (6-12): (empty)")
+      sink(line("    outputs (6-12): (empty)"))
     else
       for _, slot in ipairs(productSlots) do
-        sink(string.format("    slot %d (output): %s", slot, formatStack(a.products[slot])))
+        sink(append(line(string.format("    slot %d (output): ", slot)), formatStackSegments(a.products[slot])))
       end
     end
+    sink(line(""))
   end
 end
 

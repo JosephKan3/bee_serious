@@ -222,9 +222,17 @@ if uiEnabled then
     -- same cadence as the dashboard itself, not just once per cycle.
     if verboseEnabled then
       local row = termH + 2
-      gpu.setForeground(0xE0E0E0)
-      Sim.dumpWorld(function(line)
-        gpu.set(1, row, line)
+      -- segments is an array of { text=, color= } (not a plain string)
+      -- -- lets each piece (allele letters, princess/drone item names)
+      -- get its own gpu.setForeground() color instead of one flat color
+      -- per line.
+      Sim.dumpWorld(function(segments)
+        local col = 1
+        for _, seg in ipairs(segments) do
+          gpu.setForeground(seg.color)
+          gpu.set(col, row, seg.text)
+          col = col + #seg.text
+        end
         row = row + 1
       end)
     end
