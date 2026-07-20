@@ -316,7 +316,18 @@ function M.install(config, sites, opts)
 
   local function wrapFacing(f) return ((f - 1) % 4) + 1 end
 
+  -- select() is a raw component.robot method (inventory slot selection --
+  -- no movement/animation involved). Movement itself
+  -- (forward/turnLeft/turnRight/up/down) is NOT on the raw component at
+  -- all -- confirmed on real hardware ("attempt to call a nil value
+  -- (field 'turnRight')") -- it only exists on the high-level "robot"
+  -- LIBRARY (require("robot")), so it's faked separately below and
+  -- registered under package.loaded["robot"], not package.loaded["component"].
   component.robot = {
+    select = function(slot) world.drone._selected = slot end,
+  }
+
+  local robotLib = {
     -- Applies the step immediately (world.drone.x/z is the single source
     -- of truth the rest of this sim reads from), using the SAME facing
     -- convention bee_keeper_nav.lua tracks internally -- so its exact
@@ -340,7 +351,6 @@ function M.install(config, sites, opts)
     end,
     up = function() return true end,
     down = function() return true end,
-    select = function(slot) world.drone._selected = slot end,
   }
 
   component.inventory_controller = {
@@ -515,6 +525,7 @@ function M.install(config, sites, opts)
   package.loaded["sides"] = sidesFake
   package.loaded["component"] = component
   package.loaded["computer"] = computerFake
+  package.loaded["robot"] = robotLib
 
   -- os.sleep must exist (production code calls it), but does nothing real
   -- here -- pacing comes from the Status.onChange hook in

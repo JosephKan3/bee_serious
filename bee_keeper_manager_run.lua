@@ -95,7 +95,14 @@ local function main(args)
   if not saved or #saved.sites == 0 then
     print("No apiary sites known (skipped setup with nothing saved, or none found). Nothing to do.")
     print("Run bee_keeper_setup.run(config) again, or add sites to bee_keeper_sites.dat by hand.")
-    os.exit(1)
+    -- NOT os.exit() here -- os.exit() unwinds via a special OpenOS sentinel
+    -- that this file's xpcall would otherwise catch and misreport as
+    -- "FATAL: table: 0x...", since it looks just like any other thrown
+    -- error from inside main(). Returning a plain status instead lets the
+    -- caller below decide to exit AFTER xpcall has already returned
+    -- cleanly, so this expected/intentional exit never gets logged as a
+    -- crash.
+    return "no_sites"
   end
 
   config.sites = M.loadSites(saved.sites, config.siteOverrides)
@@ -138,13 +145,15 @@ local function main(args)
   end
 end
 
-local ok, err = xpcall(main, debug.traceback, scriptArgs)
+local ok, result = xpcall(main, debug.traceback, scriptArgs)
 if not ok then
-  print("FATAL: " .. tostring(err))
+  print("FATAL: " .. tostring(result))
 end
 if logFile then
   logFile:close()
 end
 if not ok then
-  error(err, 0)
+  error(result, 0)
+elseif result == "no_sites" then
+  os.exit(1)
 end

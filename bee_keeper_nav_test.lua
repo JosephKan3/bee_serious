@@ -19,32 +19,34 @@ local robotState = {
 
 local function wrapFacing(f) return ((f - 1) % 4) + 1 end
 
-package.loaded["component"] = {
-  robot = {
-    forward = function()
-      table.insert(robotState.callLog, "forward")
-      if robotState.blocked then return false end
-      if robotState.blockAfter and robotState.forwardCount >= robotState.blockAfter then return false end
-      robotState.forwardCount = robotState.forwardCount + 1
-      if robotState.facing == 1 then robotState.z = robotState.z + 1
-      elseif robotState.facing == 2 then robotState.x = robotState.x + 1
-      elseif robotState.facing == 3 then robotState.z = robotState.z - 1
-      elseif robotState.facing == 4 then robotState.x = robotState.x - 1 end
-      return true
-    end,
-    turnRight = function()
-      table.insert(robotState.callLog, "turnRight")
-      robotState.facing = wrapFacing(robotState.facing + 1)
-      return true
-    end,
-    turnLeft = function()
-      table.insert(robotState.callLog, "turnLeft")
-      robotState.facing = wrapFacing(robotState.facing - 1)
-      return true
-    end,
-    up = function() robotState.y = robotState.y + 1; return true end,
-    down = function() robotState.y = robotState.y - 1; return true end,
-  },
+-- bee_keeper_nav.lua calls require("robot") -- the high-level OpenComputers
+-- robot LIBRARY -- NOT component.robot (the raw component doesn't expose
+-- forward()/turnLeft()/etc. by those names; confirmed on real hardware).
+-- So the fake needs to be seeded under package.loaded["robot"] directly.
+package.loaded["robot"] = {
+  forward = function()
+    table.insert(robotState.callLog, "forward")
+    if robotState.blocked then return false end
+    if robotState.blockAfter and robotState.forwardCount >= robotState.blockAfter then return false end
+    robotState.forwardCount = robotState.forwardCount + 1
+    if robotState.facing == 1 then robotState.z = robotState.z + 1
+    elseif robotState.facing == 2 then robotState.x = robotState.x + 1
+    elseif robotState.facing == 3 then robotState.z = robotState.z - 1
+    elseif robotState.facing == 4 then robotState.x = robotState.x - 1 end
+    return true
+  end,
+  turnRight = function()
+    table.insert(robotState.callLog, "turnRight")
+    robotState.facing = wrapFacing(robotState.facing + 1)
+    return true
+  end,
+  turnLeft = function()
+    table.insert(robotState.callLog, "turnLeft")
+    robotState.facing = wrapFacing(robotState.facing - 1)
+    return true
+  end,
+  up = function() robotState.y = robotState.y + 1; return true end,
+  down = function() robotState.y = robotState.y - 1; return true end,
 }
 
 package.loaded["computer"] = {

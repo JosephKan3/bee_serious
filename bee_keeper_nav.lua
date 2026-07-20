@@ -30,7 +30,13 @@
 local M = {}
 local Status = require("bee_keeper_status")
 
-local function robot() return require("component").robot end
+-- The "robot" LIBRARY (require("robot")), NOT component.robot -- the raw
+-- component doesn't expose forward()/turnLeft()/turnRight()/up()/down()
+-- by those names at all (confirmed on real hardware: "attempt to call a
+-- nil value (field 'turnRight')"). require("robot") is OpenComputers'
+-- documented high-level movement API and is what GTNH-CropAutomation's
+-- gps.lua (the pattern this file is modeled on) actually uses.
+local function robot() return require("robot") end
 local function computer() return require("computer") end
 
 -- ============================================================
