@@ -449,24 +449,47 @@ function M.harvestSite(config, site, productSlots)
   -- inventory sizes, so this asks the real hardware instead of assuming.
   local size = invCtrl().getInventorySize(down)
   local harvested = 0
+  -- Diagnostic-only bookkeeping (see the print below) -- doesn't affect
+  -- behavior, just makes the next real-hardware run's log tell us exactly
+  -- where harvesting is failing instead of guessing again: is
+  -- productSlots being filtered out entirely by the size guard, does the
+  -- apiary genuinely have nothing in those slots from our own read, or is
+  -- suckFromSlot returning 0 despite a stack being visible there.
+  local seenNonEmpty, suckAttempts, suckFailures = {}, 0, 0
   for _, productSlot in ipairs(productSlots) do
     if not size or productSlot <= size then
+      local peek = invCtrl().getStackInSlot(down, productSlot)
+      if peek then table.insert(seenNonEmpty, productSlot) end
       for _, workingSlot in ipairs(config.workingSlots) do
         if M.readOwnSlot(workingSlot) == nil then
-          -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
-          -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
-          -- it does not auto-pick an empty slot on its own. Without this,
-          -- it silently lands in (or fails against) whatever slot was
-          -- selected last, which is why harvesting produced nothing on
-          -- real hardware despite the apiary genuinely having product to
-          -- pull.
-          agent().select(workingSlot)
-          local moved = invCtrl().suckFromSlot(down, productSlot, 1)
-          if moved and moved > 0 then harvested = harvested + 1 end
+          if peek then
+            -- suckFromSlot lands in the CURRENTLY SELECTED slot, same as
+            -- swapQueen/swapDrone/dropIntoSlot elsewhere in this file --
+            -- it does not auto-pick an empty slot on its own. Without
+            -- this, it silently lands in (or fails against) whatever
+            -- slot was selected last, which is why harvesting produced
+            -- nothing on real hardware despite the apiary genuinely
+            -- having product to pull.
+            agent().select(workingSlot)
+            suckAttempts = suckAttempts + 1
+            local moved = invCtrl().suckFromSlot(down, productSlot, 1)
+            if moved and moved > 0 then
+              harvested = harvested + 1
+            else
+              suckFailures = suckFailures + 1
+            end
+          end
           break
         end
       end
     end
+  end
+  if harvested == 0 and (size or #seenNonEmpty > 0 or suckAttempts > 0) then
+    print(string.format(
+      "[harvest-diag] %s: apiary size=%s, product slots tried=%s, non-empty seen=%s, suck attempts=%d (failed=%d)",
+      site.name or "?", tostring(size), table.concat(productSlots, ","),
+      #seenNonEmpty > 0 and table.concat(seenNonEmpty, ",") or "none",
+      suckAttempts, suckFailures))
   end
   return harvested
 end
