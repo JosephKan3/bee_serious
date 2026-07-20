@@ -332,6 +332,29 @@ function M.install(config, sites, opts)
   -- registered under package.loaded["robot"], not package.loaded["component"].
   component.robot = {
     select = function(slot) world.drone._selected = slot end,
+    -- Splits `count` items off the currently selected slot into `toSlot`
+    -- -- real robot.transferTo(slot, [count]), used by
+    -- bee_keeper_manager.lua's ensureSingleItemSlot to peel exactly one
+    -- drone off a stacked slot before swapDrone, instead of handing over
+    -- the whole stack.
+    transferTo = function(toSlot, count)
+      local from = world.drone._selected
+      local stack = world.drone.inventory[from]
+      if not stack then return false end
+      local size = stack.size or 1
+      local moveCount = count or size
+      if moveCount >= size then
+        world.drone.inventory[toSlot] = stack
+        world.drone.inventory[from] = nil
+      else
+        local newStack = {}
+        for k, v in pairs(stack) do newStack[k] = v end
+        newStack.size = moveCount
+        stack.size = size - moveCount
+        world.drone.inventory[toSlot] = newStack
+      end
+      return true
+    end,
   }
 
   local robotLib = {

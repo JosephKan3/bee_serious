@@ -96,6 +96,28 @@ mockComponent.isAvailable = function(name) return name == "robot" end
 
 mockComponent.robot = {
   select = function(slot) world.selectedSlot = slot end,
+  -- Splits `count` items off the currently selected slot into `toSlot` --
+  -- models the real robot.transferTo(slot, [count]) used by
+  -- ensureSingleItemSlot to peel exactly one drone off a stacked slot
+  -- before swapDrone, instead of handing over the whole stack.
+  transferTo = function(toSlot, count)
+    local from = world.selectedSlot
+    local stack = world.agentInventory[from]
+    if not stack then return false end
+    local size = stack.size or 1
+    local moveCount = count or size
+    if moveCount >= size then
+      world.agentInventory[toSlot] = stack
+      world.agentInventory[from] = nil
+    else
+      local newStack = {}
+      for k, v in pairs(stack) do newStack[k] = v end
+      newStack.size = moveCount
+      stack.size = size - moveCount
+      world.agentInventory[toSlot] = newStack
+    end
+    return true
+  end,
 }
 
 mockComponent.inventory_controller = {
@@ -262,6 +284,49 @@ do
   check("runQualitySite selected slot 6 (fertility carrier)", world.selectedSlot == 6, "selected=" .. tostring(world.selectedSlot))
   check("runQualitySite actually swapped the drone into the apiary", apiary(DOWN)[2] ~= nil and apiary(DOWN)[2].individual.active.fertility == Cfg.targets.fertility.target)
   check("runQualitySite pulled the weak drone's slot back out (still slot 5 in inventory, untouched)", world.agentInventory[5] ~= nil)
+end
+
+-- ============================================================
+-- Test: loading a drone that's part of a stacked cargo slot (size > 1,
+-- possible since harvestSite/findStackingSlot now merge matching
+-- drones together) only ever hands ONE drone to the apiary -- not the
+-- whole stack. swapDrone swaps the entire selected slot verbatim, so the
+-- stack must be split first.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local goodExceptFertility = {}
+  for _, t in ipairs(traitList) do goodExceptFertility[t] = Cfg.targets[t].target end
+  goodExceptFertility.fertility = 1
+  local pActive, pInactive = makeAlleles(traitList, goodExceptFertility)
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+
+  local strongTraits = { fertility = Cfg.targets.fertility.target }
+  local strongActive, strongInactive = makeAlleles(traitList, strongTraits)
+  -- Slot 6 holds THREE genetically identical drones stacked together.
+  -- Slot 5 is empty -- the only place a single drone can be split into.
+  local stackedDrone = mockBeeStack(strongActive, strongInactive, true)
+  stackedDrone.size = 3
+  world.agentInventory[6] = stackedDrone
+
+  local config = { workingSlots = { 5, 6 }, minCopies = 2 }
+  local site = { name = "stack-split-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite reports a load", status:match("^loaded drone") ~= nil, status)
+  check("only ONE drone was handed to the apiary, not the whole stack of 3",
+    apiary(DOWN)[2] ~= nil and (apiary(DOWN)[2].size or 1) == 1,
+    "apiary drone size=" .. tostring(apiary(DOWN)[2] and apiary(DOWN)[2].size))
+  check("the remaining 2 drones are still in cargo (slot 6, size reduced)",
+    world.agentInventory[6] ~= nil and world.agentInventory[6].size == 2,
+    "slot6 size=" .. tostring(world.agentInventory[6] and world.agentInventory[6].size))
+  check("the split-off single drone's slot (5) is empty again after being swapped in",
+    world.agentInventory[5] == nil)
 end
 
 -- ============================================================

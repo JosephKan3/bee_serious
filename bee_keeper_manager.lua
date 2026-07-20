@@ -247,6 +247,33 @@ local function findPrincessCandidate(config)
   return nil
 end
 
+-- swapDrone/swapQueen hand over the ENTIRE stack sitting in the currently
+-- selected slot, not one item -- fine for a princess/queen (Forestry
+-- never stacks those), but a drone slot can now legitimately hold
+-- several genetically identical drones at once since harvestSite/
+-- findStackingSlot started merging matches together. Splitting the
+-- stack was the missing step: without this, loading "one drone" into an
+-- apiary actually handed over the whole stack, wasting every extra
+-- drone in it (the apiary only ever consumes one per mating). Returns
+-- the slot now holding exactly ONE item (either the original slot
+-- unchanged, or a freshly split-off single-item slot), or nil if the
+-- stack needs splitting but no empty working slot is free to split into.
+local function ensureSingleItemSlot(config, slot)
+  local stack = invCtrl().getStackInInternalSlot(slot)
+  if not stack or (stack.size or 1) <= 1 then return slot end
+
+  for _, candidate in ipairs(config.workingSlots) do
+    if candidate ~= slot and invCtrl().getStackInInternalSlot(candidate) == nil then
+      agent().select(slot)
+      if agent().transferTo(candidate, 1) then
+        return candidate
+      end
+      return nil
+    end
+  end
+  return nil
+end
+
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
 -- Returns a short status string for logging.
 function M.runQualitySite(config, site)
@@ -338,7 +365,9 @@ function M.runQualitySite(config, site)
   end
 
   Status.setStep("Loading drone into " .. (site.name or "?"))
-  agent().select(plan.breedWith._slot)
+  local droneSlot = ensureSingleItemSlot(config, plan.breedWith._slot)
+  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(droneSlot)
   local swapped = beekeeper().swapDrone(down)
   if not swapped then return "swap_drone_failed" end
 
@@ -476,7 +505,9 @@ function M.runMutationSite(config, site)
     site.name or "?", plan.princessSpecies, plan.droneSpecies))
   agent().select(plan.princessSlot)
   if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-  agent().select(plan.droneSlot)
+  local droneSlot = ensureSingleItemSlot(config, plan.droneSlot)
+  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(droneSlot)
   if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
 
   return string.format("attempting mutation %s x %s (%.0f%% base chance)",
