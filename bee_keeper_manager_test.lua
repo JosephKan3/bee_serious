@@ -40,11 +40,19 @@ end
 -- Fake nav: instantly "arrives" and tracks position for apiary() to key
 -- off of. Real Nav geometry (proximity ordering, stuck detection) is
 -- tested against the real module in bee_keeper_nav_test.lua.
+-- gotoLog records every requested (x,z) in order -- used by the runCycle
+-- ordering test below to verify sites are fully handled one at a time
+-- (harvest+decide together) rather than visited in two separate sweeps.
+world.gotoLog = {}
 package.loaded["bee_keeper_nav"] = {
   setHome = function() end,
   setAltitude = function() return true end,
   getPos = function() return { x = world.dronePos.x, z = world.dronePos.z } end,
-  gotoXZ = function(x, z) world.dronePos = { x = x, z = z }; return true end,
+  gotoXZ = function(x, z)
+    world.dronePos = { x = x, z = z }
+    table.insert(world.gotoLog, x .. ":" .. z)
+    return true
+  end,
   gotoHome = function() world.dronePos = { x = 0, z = 0 }; return true end,
   orderByProximity = function(sites) return sites end, -- keep list order for test determinism
   needCharge = function() return false end,
@@ -729,6 +737,58 @@ do
   check("listCargo includes the bee stack", bySlot[2] ~= nil and bySlot[2].individual ~= nil)
   check("listCargo includes non-bee items too", bySlot[5] ~= nil and bySlot[5].name == "forestry:honey_drop")
   check("listCargo skips empty slots", bySlot[3] == nil and bySlot[9] == nil)
+end
+
+-- ============================================================
+-- Test: runCycle fully resolves each site (harvest + decide) before
+-- moving to the next, instead of two separate sweeps (harvest every
+-- site, THEN decide at every site). The old two-sweep structure meant an
+-- apiary that still needed a drone loaded got left behind while every
+-- OTHER site was harvested first -- this is what "leaves the apiary to
+-- go to another apiary despite the current one not having a
+-- princess/drone" on real hardware actually was.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.gotoLog = {}
+
+  local traitList = M.traitListFor("traitmax")
+  local pActive, pInactive = makeAlleles(traitList, {})
+
+  world.dronePos = { x = 1, z = 1 }
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true) -- site1's princess already present
+
+  world.dronePos = { x = 9, z = 9 }
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true) -- site2's princess already present
+
+  world.dronePos = { x = 0, z = 0 }
+
+  local strongTraits = { fertility = Cfg.targets.fertility.target }
+  local strongActive, strongInactive = makeAlleles(traitList, strongTraits)
+  world.agentInventory[10] = mockBeeStack(strongActive, strongInactive, true)
+  world.agentInventory[11] = mockBeeStack(strongActive, strongInactive, true)
+
+  local config = {
+    workingSlots = { 10, 11 },
+    minCopies = 2,
+    sites = {
+      { name = "site1", x = 1, z = 1, mode = "traitmax" },
+      { name = "site2", x = 9, z = 9, mode = "traitmax" },
+    },
+  }
+
+  M.runCycle(config)
+
+  local firstSite2Idx, lastSite1Idx = nil, nil
+  for i, pos in ipairs(world.gotoLog) do
+    if pos == "9:9" and not firstSite2Idx then firstSite2Idx = i end
+    if pos == "1:1" then lastSite1Idx = i end
+  end
+  check("site1 is fully handled (harvest+decide) before site2 is ever visited",
+    firstSite2Idx ~= nil and lastSite1Idx ~= nil and lastSite1Idx < firstSite2Idx,
+    "gotoLog=" .. table.concat(world.gotoLog, ","))
 end
 
 print("")

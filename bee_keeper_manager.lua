@@ -725,16 +725,24 @@ end
 -- call -- direct flight, minimize travel, not fixed list order).
 function M.runCycle(config)
   local log = {}
+  -- ONE pass per site -- harvest, analyze, then decide/act, all before
+  -- moving on to the next apiary. Previously this was TWO full sweeps
+  -- (harvest every site, THEN decide/act at every site), which meant an
+  -- apiary that still needed a princess seeded or a drone loaded got
+  -- left behind while every OTHER site was harvested first, only to be
+  -- revisited later in the second sweep -- wasted travel, and looked
+  -- like the robot "abandoning" a site that clearly still needed work.
   local orderedSites = Nav.orderByProximity(config.sites)
 
   for _, site in ipairs(orderedSites) do
     M.harvestSite(config, site)
-  end
+    -- Cheap and position-independent (operates on the drone's own cargo)
+    -- -- calling it once per site instead of once per cycle doesn't cost
+    -- any extra travel, and means a bee just harvested at this site is
+    -- immediately usable in this SAME site's decision below rather than
+    -- waiting for the next site's pass.
+    M.analyzeWorkingSlots(config)
 
-  M.analyzeWorkingSlots(config)
-
-  orderedSites = Nav.orderByProximity(config.sites)
-  for _, site in ipairs(orderedSites) do
     local status
     if site.mode == "traitmax" then
       status = M.runQualitySite(config, site)
