@@ -189,6 +189,26 @@ local function makeStartingRaw(traitList, speciesName)
   return g
 end
 
+-- Builds a raw genotype starting from makeStartingRaw's all-bad
+-- baseline, but with good alleles swapped in for ONLY the traits in
+-- goodTraitSet ({ trait = true, ... }) -- used for the "hard" seeding
+-- scenario (see M.newWorld's opts.hard): good alleles are scattered
+-- across SEVERAL different starting individuals instead of any one of
+-- them already having everything, so reaching a fully purebred bee
+-- genuinely requires combining different lineages via real breeding
+-- over multiple generations, not just getting lucky with an
+-- instant-good bee on cycle 1.
+local function makePartialGoodRaw(traitList, speciesName, goodTraitSet)
+  local g = makeStartingRaw(traitList, speciesName)
+  for trait in pairs(goodTraitSet) do
+    if g[trait] then
+      local spec = Cfg.targets[trait]
+      g[trait] = { active = (spec and spec.target) or 0, inactive = (spec and spec.target) or 0 }
+    end
+  end
+  return g
+end
+
 -- Converts a raw genotype (active/inactive per trait) into the
 -- stack.individual shape bee_keeper_manager.lua's readIndividual expects.
 -- Skips "_uid" -- toStack (below) caches a per-individual id directly on
@@ -370,7 +390,12 @@ M.makeStartingRaw = makeStartingRaw
 -- World
 -- ============================================================
 
-function M.newWorld(config, sites)
+-- opts.hard: scatters good alleles across SEVERAL different starting
+-- individuals (see makePartialGoodRaw) instead of handing over an
+-- instant-good bee -- see the seeding block below for exactly how the
+-- traits get split up.
+function M.newWorld(config, sites, opts)
+  opts = opts or {}
   local traitList = Cfg.activeTraits()
   table.insert(traitList, "species")
 
@@ -440,16 +465,75 @@ function M.newWorld(config, sites)
     nextStorageSlot = nextStorageSlot + 1
   end
 
-  -- General-purpose population for traitmax sites (species-agnostic) --
-  -- 2 princesses + 2 drones in cargo, 1 more of each in storage, enough
-  -- to bootstrap a handful of traitmax apiaries within the first couple
-  -- of cycles without waiting on organic growth.
-  put(makeStartingRaw(traitList, "Forest"), "princess")
-  put(makeGoodRaw(traitList, "Forest"))
-  put(makeStartingRaw(traitList, "Forest"))
-  put(makeGoodRaw(traitList, "Forest"), "princess")
-  putStorage(makeStartingRaw(traitList, "Forest"), "princess")
-  putStorage(makeGoodRaw(traitList, "Forest"))
+  if opts.hard then
+    -- HARD scenario: no single starting bee already has every trait
+    -- fixed. Every quality trait's good allele DOES exist somewhere in
+    -- the starting population (otherwise purebred would be literally
+    -- unreachable -- Mendelian inheritance can't invent an allele from
+    -- nothing), split across three DIFFERENT drone lineages, each
+    -- covering only a third of the traits -- reaching a fully purebred
+    -- bee now genuinely requires combining those lineages together via
+    -- several real generations of breeding, not getting lucky with an
+    -- instant-good bee on cycle 1. FOUR copies of each lineage are
+    -- seeded, not one -- each trait still segregates independently
+    -- every generation (real Mendelian risk, same as bee_breeding_test.
+    -- lua's own tracked "permanent allele loss" metric -- a real
+    -- possibility there too, just rare), so a single copy risked losing
+    -- an entire group forever to one unlucky non-inheritance roll
+    -- (confirmed empirically: never reached purebred in 500 cycles),
+    -- and even two copies still lost a trait outright in a sampled run.
+    -- Four copies is extra insurance beyond bee_breeding.lua's normal
+    -- minCopies=2, specifically because THIS scenario starts with zero
+    -- redundancy anywhere else in the population (every OTHER trait
+    -- already has a "safe" GG source from the other lineages) -- it
+    -- makes loss rare without making it impossible, so "hard" stays a
+    -- genuine (if unlikely) risk, not a guarantee -- and even without
+    -- any loss at all, actually recombining all 9 traits into ONE
+    -- princess simultaneously (via a single blind random succession
+    -- each generation, not a deliberate pick -- see bee_breeding_test.
+    -- lua's header notes) is itself a slow, genuinely hard process, not
+    -- guaranteed to finish within any particular number of cycles --
+    -- that's the whole point of "hard" mode, not a bug to fix.
+    local qualityTraits = {}
+    for _, t in ipairs(traitList) do
+      if t ~= "species" then table.insert(qualityTraits, t) end
+    end
+    local groups = { {}, {}, {} }
+    for i, t in ipairs(qualityTraits) do
+      table.insert(groups[((i - 1) % 3) + 1], t)
+    end
+    local function toSet(list)
+      local set = {}
+      for _, t in ipairs(list) do set[t] = true end
+      return set
+    end
+
+    -- 4 copies of each lineage -- 2 in cargo, 2 in storage -- reduces
+    -- (does not eliminate) the chance of a trait vanishing outright
+    -- before it ever gets combined with the other lineages.
+    put(makeStartingRaw(traitList, "Forest"), "princess")
+    for _, group in ipairs(groups) do
+      put(makePartialGoodRaw(traitList, "Forest", toSet(group)))
+    end
+    putStorage(makeStartingRaw(traitList, "Forest"), "princess")
+    for _, group in ipairs(groups) do
+      put(makePartialGoodRaw(traitList, "Forest", toSet(group)))
+    end
+    for _, group in ipairs(groups) do
+      putStorage(makePartialGoodRaw(traitList, "Forest", toSet(group)))
+    end
+  else
+    -- General-purpose population for traitmax sites (species-agnostic)
+    -- -- 2 princesses + 2 drones in cargo, 1 more of each in storage,
+    -- enough to bootstrap a handful of traitmax apiaries within the
+    -- first couple of cycles without waiting on organic growth.
+    put(makeStartingRaw(traitList, "Forest"), "princess")
+    put(makeGoodRaw(traitList, "Forest"))
+    put(makeStartingRaw(traitList, "Forest"))
+    put(makeGoodRaw(traitList, "Forest"), "princess")
+    putStorage(makeStartingRaw(traitList, "Forest"), "princess")
+    putStorage(makeGoodRaw(traitList, "Forest"))
+  end
 
   for _, s in ipairs(sites) do
     if s.mode == "mutation" then
@@ -490,7 +574,7 @@ end
 -- something a config file changes.
 function M.install(config, sites, opts)
   opts = opts or {}
-  local world = M.newWorld(config, sites)
+  local world = M.newWorld(config, sites, opts)
   world.cargoSize = opts.cargoSize or 16
   world.storageSize = opts.storageSize or 27
 
@@ -498,6 +582,25 @@ function M.install(config, sites, opts)
   local function atPos(px, pz) return px ~= nil and world.drone.x == px and world.drone.z == pz end
   local function atStorage() return config.storagePos and atPos(config.storagePos.x, config.storagePos.z) end
   local function atTrash() return config.trashPos and atPos(config.trashPos.x, config.trashPos.z) end
+  local function atCharger() return config.chargerPos and atPos(config.chargerPos.x, config.chargerPos.z) end
+
+  -- Real hardware genuinely drains energy per block moved -- world.drone.
+  -- energy was previously set once at world creation and never touched
+  -- again anywhere, so Nav.needCharge could never trigger and the drone
+  -- would never even attempt to visit the charger. ENERGY_PER_BLOCK is a
+  -- fraction of a full charge (not absolute EU, matching how this sim's
+  -- energy is read elsewhere as a 0..1 fraction) -- picked so a full
+  -- charge lasts roughly 200 blocks of travel, occasionally showing
+  -- charging behavior without draining every few steps.
+  local ENERGY_PER_BLOCK = 0.005
+  -- Passive recharge while standing at the charger -- ticks up on every
+  -- energy() poll, mirroring real hardware where the charger increases
+  -- energy in the background and Nav.chargeAtHome just polls it in a
+  -- loop. Chunky enough that the poll loop (see computerFake.energy
+  -- below) finishes in a bounded, small number of iterations instead of
+  -- spinning forever -- os.sleep is a no-op in this sim, so nothing else
+  -- would ever advance real time between polls.
+  local ENERGY_CHARGE_PER_POLL = 0.05
 
   -- Stamps world.recentlyMovedBeeUid/Step together (always as a pair --
   -- see M.tickStep/flashRow for how the step snapshot decides how long
@@ -580,6 +683,7 @@ function M.install(config, sites, opts)
       elseif world.drone.facing == 2 then world.drone.x = world.drone.x + 1
       elseif world.drone.facing == 3 then world.drone.z = world.drone.z - 1
       elseif world.drone.facing == 4 then world.drone.x = world.drone.x - 1 end
+      world.drone.energy = math.max(0, (world.drone.energy or 0) - ENERGY_PER_BLOCK)
       return true
     end,
     turnRight = function()
@@ -899,7 +1003,19 @@ function M.install(config, sites, opts)
   M.beginScreen()
 
   local computerFake = {
-    energy = function() return world.drone.energy end,
+    -- Passive recharge while standing at the charger, ticking up on
+    -- every poll -- see ENERGY_CHARGE_PER_POLL's header notes. Real
+    -- hardware's charger increases energy in the background
+    -- independently of anything the manager code does; Nav.chargeAtHome
+    -- just polls computer.energy() in a loop, so ticking it up HERE (the
+    -- only thing actually being polled) is what makes that loop actually
+    -- terminate in this sim, instead of energy sitting frozen forever.
+    energy = function()
+      if atCharger() then
+        world.drone.energy = math.min(1, (world.drone.energy or 0) + ENERGY_CHARGE_PER_POLL)
+      end
+      return world.drone.energy
+    end,
     maxEnergy = function() return 1 end,
     beep = function() end, -- no audio locally; bee_keeper_setup's border-preview signal just no-ops
   }
@@ -1002,7 +1118,18 @@ end
 -- or red (bad). Returns a single segment saying "unidentified" for an
 -- unanalyzed bee -- matches real Forestry: you can't see a bee's traits
 -- until you identify it with honey.
-local function traitSegments(individual)
+--
+-- targetSpecies: species is genetically just another chromosome (see
+-- bee_trait_config.lua's header notes) and bee_keeper_manager.lua
+-- tracks it as an active trait exactly like any other whenever a site
+-- has a real target (species/mutation modes -- see M.traitListFor).
+-- Shown here the SAME way: GG/Gb/bb, green/red per allele, whenever a
+-- targetSpecies is known. Without one (traitmax mode, or a cargo/
+-- storage bee not tied to any one site's target), there's no "good"
+-- species to score against -- scoring it "bad" by default would be
+-- actively misleading (implying every species is wrong when none is
+-- targeted), so the raw species name is shown instead, unscored.
+local function traitSegments(individual, targetSpecies)
   if not individual.isAnalyzed then
     return { { text = "unidentified", color = COLOR_DEFAULT } }
   end
@@ -1017,6 +1144,20 @@ local function traitSegments(individual)
       table.insert(segments, { text = allele, color = (allele == "G") and COLOR_GOOD or COLOR_BAD })
     end
   end
+
+  table.insert(segments, { text = ",", color = COLOR_DEFAULT })
+  table.insert(segments, { text = "species=", color = COLOR_DEFAULT })
+  if targetSpecies then
+    local speciesGenotype = Cfg.normalizeGenotype({ "species" }, individual.active, individual.inactive, targetSpecies)
+    local state = BB.traitState(speciesGenotype, "species")
+    for allele in state:gmatch(".") do
+      table.insert(segments, { text = allele, color = (allele == "G") and COLOR_GOOD or COLOR_BAD })
+    end
+  else
+    local species = individual.active and individual.active.species
+    table.insert(segments, { text = species and Cfg.speciesKey(species) or "?", color = COLOR_DEFAULT })
+  end
+
   return segments
 end
 
@@ -1027,7 +1168,7 @@ end
 -- a drone -- these (and the allele green/red from traitSegments) are the
 -- row's own "real" colors; the moved-bee cyan flash is layered on top of
 -- everything ELSE afterward, by flashRow, not decided here.
-local function formatStackSegments(stack, showTraits)
+local function formatStackSegments(stack, showTraits, targetSpecies)
   if not stack then return { { text = "empty", color = COLOR_DEFAULT } } end
 
   local nameColor = COLOR_DEFAULT
@@ -1049,7 +1190,7 @@ local function formatStackSegments(stack, showTraits)
     })
     if showTraits then
       table.insert(segments, { text = " {", color = COLOR_DEFAULT })
-      append(segments, traitSegments(stack.individual))
+      append(segments, traitSegments(stack.individual, targetSpecies))
       table.insert(segments, { text = "}", color = COLOR_DEFAULT })
     end
   else
@@ -1109,10 +1250,25 @@ function M.dumpWorld(sink, sites)
   local world = M.world
   if not world then return end
 
+  -- Species is genetically just another chromosome, tracked as an
+  -- active trait exactly like any other whenever a site actually has a
+  -- target (species/mutation modes -- see M.traitListFor). posToSite
+  -- lets each apiary's princess/drone be scored against ITS OWN site's
+  -- target; globalTargetSpecies is the fallback for cargo/storage bees,
+  -- which aren't tied to any one site -- the first tracked target found
+  -- across all sites (this local sim always runs every site under the
+  -- same mode/targetSpecies anyway, so "first found" covers the normal
+  -- case).
   local posToName = {}
+  local posToSite = {}
+  local globalTargetSpecies = nil
   if sites then
     for _, s in ipairs(sites) do
       posToName[s.x .. ":" .. s.z] = s.name
+      posToSite[s.x .. ":" .. s.z] = s
+      if not globalTargetSpecies and (s.mode == "species" or s.mode == "mutation") and s.targetSpecies then
+        globalTargetSpecies = s.targetSpecies
+      end
     end
   end
 
@@ -1126,7 +1282,7 @@ function M.dumpWorld(sink, sites)
   if #cargoSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(cargoSlots) do
     local stack = world.drone.inventory[slot]
-    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true))
+    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true, globalTargetSpecies))
     sink(flashRow(row, wasRecentlyMoved(stack)))
   end
   sink(line(""))
@@ -1137,7 +1293,7 @@ function M.dumpWorld(sink, sites)
   if #storageSlots == 0 then sink(line("  (empty)")) end
   for _, slot in ipairs(storageSlots) do
     local stack = world.storage[slot]
-    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true))
+    local row = append(line(string.format("  slot %d: ", slot)), formatStackSegments(stack, true, globalTargetSpecies))
     sink(flashRow(row, wasRecentlyMoved(stack)))
   end
   sink(line(""))
@@ -1149,14 +1305,21 @@ function M.dumpWorld(sink, sites)
     local label = posToName[key] or key
     sink(line(string.format("  %s @ (%s) -- work %d/%d:", label, key, a.workTicks, a.workNeeded)))
 
+    -- This apiary's OWN site target, not the global fallback -- a
+    -- traitmax site has no meaningful species target even if some OTHER
+    -- site in the same run does.
+    local site = posToSite[key]
+    local siteTargetSpecies = site and (site.mode == "species" or site.mode == "mutation")
+      and site.targetSpecies or nil
+
     local princessStack = a.princessRaw and toStack(a.princessRaw, "princess") or nil
     local princessRow = append(line("    slot 1 (princess): "),
-      princessStack and formatStackSegments(princessStack, true) or line("empty"))
+      princessStack and formatStackSegments(princessStack, true, siteTargetSpecies) or line("empty"))
     sink(flashRow(princessRow, wasRecentlyMoved(princessStack)))
 
     local droneStack = a.droneRaw and toStack(a.droneRaw, "drone") or nil
     local droneRow = append(line("    slot 2 (drone): "),
-      droneStack and formatStackSegments(droneStack, true) or line("empty"))
+      droneStack and formatStackSegments(droneStack, true, siteTargetSpecies) or line("empty"))
     sink(flashRow(droneRow, wasRecentlyMoved(droneStack)))
 
     local productSlots = sortedKeys(a.products or {})
