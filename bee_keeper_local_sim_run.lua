@@ -119,6 +119,7 @@ for i = 1, SITE_COUNT do
 end
 
 config.storagePos = config.storagePos or { x = -6, z = -6 }
+config.trashPos = config.trashPos or { x = -8, z = -8 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
 -- Real hardware auto-derives this from getInventorySize() (see
 -- M.resolveWorkingSlots), but that needs component.inventory_controller
