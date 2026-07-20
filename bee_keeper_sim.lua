@@ -304,12 +304,38 @@ local function isDroneStack(stack)
   return stack.name:lower():find("drone") ~= nil
 end
 
--- Shallow-copies a stack's fields into a brand-new table -- used whenever
--- a NEW stack needs to exist independently of its source (so mutating
--- the copy's .size later doesn't also change the original).
+-- Shallow-copies a flat { trait = rawValue, ... } table -- the allele
+-- values themselves (numbers/strings/booleans/species tables) are never
+-- mutated in place anywhere, only replaced wholesale, so one level of
+-- copying is enough to make active/inactive independent between split
+-- stacks.
+local function shallowCopyTable(t)
+  local copy = {}
+  for k, v in pairs(t) do copy[k] = v end
+  return copy
+end
+
+-- Copies a stack's fields into a brand-new table -- used whenever a NEW
+-- stack needs to exist independently of its source (so mutating the
+-- copy's .size later doesn't also change the original). .individual gets
+-- a DEEP copy (not just the outer stack table) -- this is what happens
+-- whenever a stacked quantity gets split (e.g. depositInto pulling 1 of
+-- 2 identical drones into cargo): without deep-copying, both halves
+-- shared the exact same .individual table, so analyzing the CARGO half
+-- (setting .isAnalyzed = true) silently marked the OTHER, still-in-the-
+-- apiary half as analyzed too, even though it was never actually
+-- identified with honey.
 local function cloneStack(stack, size)
   local copy = {}
   for k, v in pairs(stack) do copy[k] = v end
+  if stack.individual then
+    local ind = stack.individual
+    copy.individual = {
+      isAnalyzed = ind.isAnalyzed,
+      active = ind.active and shallowCopyTable(ind.active) or nil,
+      inactive = ind.inactive and shallowCopyTable(ind.inactive) or nil,
+    }
+  end
   copy.size = size or stack.size or 1
   copy.maxSize = MAX_STACK
   return copy
