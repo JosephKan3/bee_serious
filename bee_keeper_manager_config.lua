@@ -19,9 +19,15 @@ return {
   -- Keep honeySlot and any equipment slots out of this list.
   workingSlots = { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
 
-  -- Where an apiary's offspring/product output lives (see beeManager.lua's
-  -- old scanApiaries -- same slot range, different mechanism).
-  productSlots = { 7, 8, 9, 10, 11, 12, 13, 14, 15 },
+  -- Where an apiary's offspring/product output (combs, drones, the
+  -- replacement princess) lives. Leave nil -- M.harvestSite auto-derives
+  -- this as "every slot from 3 to the apiary's real reported size" via
+  -- getInventorySize(), which is what actually matches real hardware
+  -- (confirmed via probeInventoryBelow(): the old hardcoded 7-15 guess,
+  -- inherited from beeManager.lua's Transposer-based version, was wrong
+  -- -- product was actually sitting in slots 3-6). Only set this if you
+  -- need to override the auto-derived range for some reason.
+  productSlots = nil,
 
   -- Forwarded to bee_breeding.lua's planGeneration -- how many independent
   -- drone-sources of a good allele to keep on hand per trait (default 2 if

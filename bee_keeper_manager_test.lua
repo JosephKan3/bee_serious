@@ -347,6 +347,29 @@ do
 end
 
 -- ============================================================
+-- Test: without an explicit config.productSlots, harvestSite auto-derives
+-- "every slot from 3 to the apiary's real size" -- this is exactly what
+-- real hardware needed (product actually sits in slots 3-6 on a real
+-- apiary, not 7-15, which was the old hardcoded guess).
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+  apiary(DOWN)[3] = mockBeeStack({ fertility = 2 }, { fertility = 2 }, true)
+  apiary(DOWN)[5] = mockBeeStack({ fertility = 3 }, { fertility = 3 }, true)
+
+  local config = { workingSlots = { 1, 2, 3 } } -- no productSlots override
+  local site = { name = "harvest-site-auto", x = 5, z = 9, mode = "traitmax" }
+  local harvested = M.harvestSite(config, site)
+  check("harvestSite auto-derives product slots starting at 3, not 7",
+    harvested == 2, "harvested=" .. tostring(harvested))
+  check("harvestSite (auto-derived) clears the apiary's product slots",
+    apiary(DOWN)[3] == nil and apiary(DOWN)[5] == nil)
+end
+
+-- ============================================================
 -- Test: dumpToStorage flies to storagePos and drops discarded drones
 -- ============================================================
 

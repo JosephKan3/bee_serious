@@ -430,12 +430,22 @@ end
 -- Harvesting: pull an apiary's product slots into working slots
 -- ============================================================
 
--- Forestry apiaries expose product/offspring output in slots beyond the
--- queen(1)/drone(2) pair (see beeManager.lua's old scanApiaries, which
--- cleared slots 7-15 via transposer -- same idea, now via
--- inventory_controller.suckFromSlot instead of a transposer).
+-- Tracks which sites have already had a full slot dump logged (see the
+-- harvested==0 diagnostic below) so a persistently-empty apiary doesn't
+-- flood the log every cycle.
+local diagDumpedSites = {}
+
+-- Forestry apiaries expose product/offspring output (combs, drones, the
+-- replacement princess) in every slot beyond the queen(1)/drone(2) pair.
+-- Confirmed via probeInventoryBelow() against real hardware: the old
+-- 7-15 range (inherited from beeManager.lua's Transposer-based version)
+-- was flat-out wrong for this apiary -- product was actually sitting in
+-- slots 3-6, with 7+ empty. Rather than hardcode another guessed range
+-- that might not hold for a different apiary tier/type, this derives
+-- "every slot from 3 to the apiary's real reported size" unless
+-- config.productSlots explicitly overrides it.
 function M.harvestSite(config, site, productSlots)
-  productSlots = productSlots or config.productSlots or { 7, 8, 9, 10, 11, 12, 13, 14, 15 }
+  productSlots = productSlots or config.productSlots
   Status.setStep("Harvesting " .. (site.name or "?"))
   local ok = gotoSite(site)
   if not ok then return 0 end
@@ -443,11 +453,17 @@ function M.harvestSite(config, site, productSlots)
   local down = sides().down
   -- A Robot's inventory_controller.suckFromSlot validates the slot against
   -- the TARGET inventory's real size and throws "invalid slot" for
-  -- anything beyond it -- unlike a Transposer (what the old beeManager.lua
-  -- used with this same 7-15 range), which just silently returns nil for
-  -- an out-of-range slot. Different apiary tiers/types have different
-  -- inventory sizes, so this asks the real hardware instead of assuming.
+  -- anything beyond it -- unlike a Transposer, which just silently
+  -- returns nil for an out-of-range slot. Different apiary tiers/types
+  -- have different inventory sizes, so this asks the real hardware
+  -- instead of assuming.
   local size = invCtrl().getInventorySize(down)
+
+  if not productSlots then
+    productSlots = {}
+    for slot = 3, (size or 15) do table.insert(productSlots, slot) end
+  end
+
   local harvested = 0
   -- Diagnostic-only bookkeeping (see the print below) -- doesn't affect
   -- behavior, just makes the next real-hardware run's log tell us exactly
@@ -490,6 +506,25 @@ function M.harvestSite(config, site, productSlots)
       site.name or "?", tostring(size), table.concat(productSlots, ","),
       #seenNonEmpty > 0 and table.concat(seenNonEmpty, ",") or "none",
       suckAttempts, suckFailures))
+
+    -- Dump EVERY slot (not just the configured productSlots candidates),
+    -- once per site, so the ground truth of where a princess/drone/comb
+    -- actually sits shows up in the log automatically -- no separate
+    -- manual probe step needed. Once-per-site (not every cycle) so a
+    -- persistently-empty apiary doesn't flood the log forever.
+    if size and not diagDumpedSites[site.name] then
+      diagDumpedSites[site.name] = true
+      local dump = { string.format("[harvest-diag-full] %s: dumping all %d slots:", site.name or "?", size) }
+      for slot = 1, size do
+        local stack = invCtrl().getStackInSlot(down, slot)
+        if stack then
+          table.insert(dump, string.format("  slot %d: %s x%s (%s)",
+            slot, tostring(stack.name), tostring(stack.size), tostring(stack.label)))
+        end
+      end
+      if #dump == 1 then table.insert(dump, "  (every slot reported empty)") end
+      print(table.concat(dump, "\n"))
+    end
   end
   return harvested
 end
