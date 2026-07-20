@@ -1,77 +1,83 @@
 --[[
   Bee Keeper Nav
   ---------------
-  Direct-flight movement for a Drone hovering at one fixed Y level, plus
-  dead-reckoning position tracking. Modeled on GTNH-CropAutomation's
-  gps.lua (a proven, production pattern) but adapted for continuous Drone
-  flight instead of a Robot's discrete forward()/turn() steps -- per your
-  call, no stepwise movement: gotoXZ commands the drone straight to a
-  target in one shot via the Drone's own physics (component.drone.move
-  sets a target offset; the drone accelerates/decelerates toward it on its
-  own, not fully instant).
+  Discrete step-based movement for a ROBOT (confirmed via
+  component.isAvailable("drone")==false / ("robot")==true on the actual
+  hardware -- this replaces an earlier Drone-flight version, which
+  doesn't apply here: a Robot has no component.drone.move()/getOffset()
+  at all). Modeled directly on GTNH-CropAutomation's gps.lua -- a proven,
+  production pattern for exactly this: Robot movement, one block at a
+  time, turn-optimal pathing, hovering at one fixed Y level.
 
-  CONFIRMED FROM SOURCE (li.cil.oc.server.component.Drone):
-    - move(dx,dy,dz): adds a RELATIVE offset to the drone's internal
-      target position. Not a teleport -- the drone flies there over time.
-    - getOffset(): remaining distance to that target, in blocks. Poll this
-      to know when you've arrived (this module uses arrivalThreshold).
-  There is no absolute-position API without a Navigation Upgrade + map
-  item (which most drones won't have) -- so, like the crop bot, position
-  is tracked purely by dead reckoning from a known home/charger point.
-  This drifts only if a move is interrupted/blocked; see stuck-detection
-  below.
+  Position tracking is EXACT here (unlike a Drone's dead reckoning):
+  robot.forward()/turnLeft()/etc. each either fully succeed or fully
+  fail, there's no "interrupted mid-flight" ambiguity to account for.
 
-  Y IS FIXED: per your requirement, this never issues a dy != 0 move on
-  its own. Altitude is set once (see Nav.setHome) and everything else is
-  X/Z only. If you need the drone to change altitude (e.g. to actually
-  reach the charger, or to fly over an obstacle), do that explicitly with
-  Nav.setAltitude -- it's deliberately not automatic.
+  Y IS FIXED: per the original requirement, this never issues an up()/
+  down() call on its own. Altitude is set once (Nav.setHome) and
+  everything else is X/Z only; Nav.setAltitude is the one deliberate
+  exception.
+
+  gotoXZ is still the one entry point everything else calls, so
+  bee_keeper_manager.lua/bee_keeper_setup.lua needed ZERO changes for
+  this swap -- they only ever call Nav.gotoXZ/getPos/orderByProximity,
+  never touch movement primitives directly. (bee_keeper_setup.lua's
+  corner-preview light flash is the one place that DOES touch a
+  Drone-only API directly -- see its own comments for how that degrades
+  on a Robot.)
 --]]
 
 local M = {}
 local Status = require("bee_keeper_status")
 
-local function drone() return require("component").drone end
+local function robot() return require("component").robot end
 local function computer() return require("computer") end
 
 -- ============================================================
 -- State
 -- ============================================================
 
-local pos = { x = 0, z = 0 }  -- dead-reckoned position relative to home
+local pos = { x = 0, z = 0 }  -- exact position relative to home
 local homePos = { x = 0, z = 0 }
 local y = nil  -- the fixed flight altitude; set via Nav.setHome/setAltitude
 
-M.arrivalThreshold = 0.35     -- blocks; getOffset() below this counts as "arrived"
-M.stuckTimeout = 8            -- seconds with no progress before treating a move as stuck
-M.pollInterval = 0.2          -- seconds between getOffset() polls
+-- Internal facing convention, purely for computing turn deltas -- doesn't
+-- need to match OC's `sides` numbering. 1=+Z, 2=+X, 3=-Z, 4=-X.
+local facing = 1
+
+-- Consecutive failed forward()/up()/down() attempts (a mob, a placed
+-- block, anything transient-or-not in the way) before giving up and
+-- reporting stuck, rather than retrying forever like gps.lua's
+-- safeForward() does.
+M.MAX_RETRIES = 20
 
 function M.getPos() return { x = pos.x, z = pos.z } end
 function M.getAltitude() return y end
+function M.getFacing() return facing end
 
--- Call once at startup, at the drone's actual starting position (e.g. on
--- its charger). Establishes the origin for all dead-reckoned coordinates
--- and locks in the fixed flight altitude.
+-- Call once at startup, at the robot's actual starting position (e.g. on
+-- its charger). Establishes the origin for all tracked coordinates and
+-- locks in the fixed operating altitude.
 function M.setHome(altitude)
   pos = { x = 0, z = 0 }
   homePos = { x = 0, z = 0 }
+  facing = 1
   y = altitude
 end
 
--- Explicit altitude change (the one deliberate exception to "Y is fixed").
--- dy is a relative offset, same semantics as gotoXZ's dx/dz.
+-- Explicit altitude change (the one deliberate exception to "Y is
+-- fixed"). dy is a relative offset, same semantics as gotoXZ's target.
 function M.setAltitude(newY)
   if y == nil then
     error("Nav.setHome must be called before setAltitude")
   end
   local dy = newY - y
-  if dy ~= 0 then
-    drone().move(0, dy, 0)
-    local waited = 0
-    while drone().getOffset() > M.arrivalThreshold do
-      os.sleep(M.pollInterval)
-      waited = waited + M.pollInterval
-      if waited > M.stuckTimeout then
+  local step = dy > 0 and robot().up or robot().down
+  for _ = 1, math.abs(dy) do
+    local attempts = 0
+    while not step() do
+      attempts = attempts + 1
+      if attempts > M.MAX_RETRIES then
         return false, "stuck_changing_altitude"
       end
     end
@@ -84,10 +90,45 @@ end
 -- Movement
 -- ============================================================
 
--- Flies directly (single move, not stepwise) to the given X/Z, at the
--- fixed altitude. Returns true on arrival, or false + reason if it got
--- stuck (no progress for stuckTimeout seconds -- most likely an obstacle
--- in the way, since drones aren't noclip).
+local function turnTo(target)
+  local delta = (target - facing) % 4
+  if delta <= 2 then
+    for _ = 1, delta do robot().turnRight() end
+  else
+    for _ = 1, 4 - delta do robot().turnLeft() end
+  end
+  facing = target
+end
+
+local function turningCost(target)
+  local delta = (target - facing) % 4
+  return math.min(delta, 4 - delta)
+end
+
+-- Steps forward up to `count` times in the CURRENT facing. Returns how
+-- many steps actually succeeded (so a partial failure mid-leg can still
+-- be reflected accurately in tracked position) plus a reason if it
+-- didn't complete all of them.
+local function stepForward(count)
+  local completed = 0
+  for _ = 1, count do
+    local attempts = 0
+    while not robot().forward() do
+      attempts = attempts + 1
+      if attempts > M.MAX_RETRIES then
+        return completed, "stuck_moving_forward"
+      end
+    end
+    completed = completed + 1
+  end
+  return completed, nil
+end
+
+-- Walks directly to the given X/Z at the fixed altitude, turn-optimal
+-- (does whichever axis needs the smaller turn first -- same heuristic as
+-- gps.lua's go()). Returns true on arrival, or false + reason if it got
+-- stuck partway (position is updated to reflect exactly how far it
+-- actually got, not silently left wrong).
 function M.gotoXZ(targetX, targetZ)
   if y == nil then
     error("Nav.setHome must be called before gotoXZ")
@@ -99,35 +140,37 @@ function M.gotoXZ(targetX, targetZ)
     return true
   end
 
-  Status.setStep(string.format("Flying to (%d,%d)", targetX, targetZ))
-  drone().move(dx, 0, dz)
+  Status.setStep(string.format("Walking to (%d,%d)", targetX, targetZ))
 
-  local lastOffset = drone().getOffset()
-  local stuckFor = 0
-  while true do
-    os.sleep(M.pollInterval)
-    local offset = drone().getOffset()
+  local path = {}
+  if dx > 0 then path[#path + 1] = { 2, dx }
+  elseif dx < 0 then path[#path + 1] = { 4, -dx } end
+  if dz > 0 then path[#path + 1] = { 1, dz }
+  elseif dz < 0 then path[#path + 1] = { 3, -dz } end
 
-    if offset <= M.arrivalThreshold then
-      pos = { x = targetX, z = targetZ }
-      return true
-    end
+  if #path == 2 and turningCost(path[2][1]) < turningCost(path[1][1]) then
+    path[1], path[2] = path[2], path[1]
+  end
 
-    -- Progress check: if the remaining distance isn't shrinking, we're
-    -- probably blocked by something solid.
-    if offset < lastOffset - 0.01 then
-      stuckFor = 0
-    else
-      stuckFor = stuckFor + M.pollInterval
-    end
-    lastOffset = offset
+  local traveled = { x = pos.x, z = pos.z }
+  for _, leg in ipairs(path) do
+    turnTo(leg[1])
+    local completed, reason = stepForward(leg[2])
 
-    if stuckFor > M.stuckTimeout then
-      local reason = "stuck_at_offset_" .. string.format("%.1f", offset)
-      Status.setStep(string.format("STUCK flying to (%d,%d): %s", targetX, targetZ, reason))
+    if leg[1] == 2 then traveled.x = traveled.x + completed
+    elseif leg[1] == 4 then traveled.x = traveled.x - completed
+    elseif leg[1] == 1 then traveled.z = traveled.z + completed
+    elseif leg[1] == 3 then traveled.z = traveled.z - completed end
+
+    if reason then
+      pos = traveled
+      Status.setStep(string.format("STUCK walking to (%d,%d): %s", targetX, targetZ, reason))
       return false, reason
     end
   end
+
+  pos = { x = targetX, z = targetZ }
+  return true
 end
 
 function M.gotoHome()
@@ -136,18 +179,19 @@ end
 
 -- ============================================================
 -- Site visiting order: nearest-neighbor from the current position, not
--- config list order -- minimizes total travel per cycle (your call).
+-- config list order -- minimizes total travel per cycle. Manhattan
+-- distance (not Euclidean) since that's what a grid-walker actually
+-- pays for each site.
 -- ============================================================
 
-local function dist2(ax, az, bx, bz)
-  local dx, dz = ax - bx, az - bz
-  return dx * dx + dz * dz
+local function dist(ax, az, bx, bz)
+  return math.abs(ax - bx) + math.abs(az - bz)
 end
 
 -- sites: array of { x=.., z=.., ... }. Returns a NEW array in
--- nearest-neighbor visiting order starting from the drone's current
--- position (greedy -- not the optimal TSP tour, but cheap and good enough
--- for a handful of apiaries revisited every cycle).
+-- nearest-neighbor visiting order starting from the robot's current
+-- position (greedy -- not the optimal TSP tour, but cheap and good
+-- enough for a handful of apiaries revisited every cycle).
 function M.orderByProximity(sites)
   local remaining = {}
   for i, s in ipairs(sites) do remaining[i] = s end
@@ -157,7 +201,7 @@ function M.orderByProximity(sites)
   while #remaining > 0 do
     local bestIdx, bestDist = 1, math.huge
     for i, s in ipairs(remaining) do
-      local d = dist2(cx, cz, s.x, s.z)
+      local d = dist(cx, cz, s.x, s.z)
       if d < bestDist then
         bestDist = d
         bestIdx = i
@@ -172,8 +216,8 @@ function M.orderByProximity(sites)
 end
 
 -- ============================================================
--- Charging (mirrors action.lua's charge() -- computer.energy() is generic
--- OC API, works the same for a Drone as a Robot)
+-- Charging (mirrors action.lua's charge() -- computer.energy() is
+-- generic OC API, unaffected by Robot vs Drone)
 -- ============================================================
 
 function M.needCharge(threshold)
@@ -185,9 +229,9 @@ function M.isFullyCharged()
   return computer().energy() / computer().maxEnergy() > 0.99
 end
 
--- Flies home and waits until charged. chargerXZ defaults to home (0,0) --
--- pass an explicit position if the charger isn't where Nav.setHome was
--- called.
+-- Walks home and waits until charged. chargerXZ defaults to home (0,0)
+-- -- pass an explicit position if the charger isn't where Nav.setHome
+-- was called.
 function M.chargeAtHome(chargerXZ)
   local target = chargerXZ or homePos
   M.gotoXZ(target.x, target.z)

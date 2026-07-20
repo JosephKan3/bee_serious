@@ -6,9 +6,11 @@
   code already talks to (that's the whole point of the decoupling: nothing
   in bee_keeper_manager.lua/bee_keeper_nav.lua/bee_keeper_ui.lua changes at
   all to run against this instead of real hardware), with a coherent fake
-  world: a drone (position/energy/inventory), apiaries that actually breed
-  using bee_breeding.lua's real genetics (not scripted results), and a
-  storage chest.
+  world: a Robot agent (position/facing/energy/inventory, exposing
+  component.robot -- see bee_keeper_nav.lua's header on why this is a
+  Robot and not a Drone), apiaries that actually breed using
+  bee_breeding.lua's real genetics (not scripted results), and a storage
+  chest.
 
   PACING: per your call, actions take ~1 real second when running locally,
   and NOTHING here touches the real drone path at all -- when
@@ -222,6 +224,7 @@ function M.newWorld(config, sites)
     traitList = traitList,
     drone = {
       x = 0, z = 0,
+      facing = 1, -- internal convention: 1=+Z, 2=+X, 3=-Z, 4=-X (matches bee_keeper_nav.lua)
       energy = 0.9,
       inventory = {},
     },
@@ -307,22 +310,37 @@ function M.install(config, sites, opts)
   local DOWN = sidesFake.down
 
   local component = {}
-  component.isAvailable = function(name) return name == "drone" or name == "beekeeper" or name == "inventory_controller" end
+  component.isAvailable = function(name)
+    return name == "robot" or name == "beekeeper" or name == "inventory_controller" or name == "computer"
+  end
 
-  component.drone = {
-    -- Applies the move immediately (world.drone.x/z is the single source
-    -- of truth the rest of this sim reads from) -- getOffset() then
-    -- reports "arrived" on the very next poll, so bee_keeper_nav.lua's
-    -- dead-reckoned position and this world's actual position never
-    -- drift apart, and flight distance doesn't affect sim speed at all
-    -- (pacing comes entirely from the Status.onChange hook instead).
-    move = function(dx, dy, dz)
-      world.drone.x = world.drone.x + dx
-      world.drone.z = world.drone.z + dz
+  local function wrapFacing(f) return ((f - 1) % 4) + 1 end
+
+  component.robot = {
+    -- Applies the step immediately (world.drone.x/z is the single source
+    -- of truth the rest of this sim reads from), using the SAME facing
+    -- convention bee_keeper_nav.lua tracks internally -- so its exact
+    -- position tracking and this world's actual position never drift
+    -- apart, and travel distance doesn't affect sim speed at all (pacing
+    -- comes entirely from the Status.onChange hook instead).
+    forward = function()
+      if world.drone.facing == 1 then world.drone.z = world.drone.z + 1
+      elseif world.drone.facing == 2 then world.drone.x = world.drone.x + 1
+      elseif world.drone.facing == 3 then world.drone.z = world.drone.z - 1
+      elseif world.drone.facing == 4 then world.drone.x = world.drone.x - 1 end
+      return true
     end,
-    getOffset = function() return 0 end,
-    getLightColor = function() return 0 end,
-    setLightColor = function() end,
+    turnRight = function()
+      world.drone.facing = wrapFacing(world.drone.facing + 1)
+      return true
+    end,
+    turnLeft = function()
+      world.drone.facing = wrapFacing(world.drone.facing - 1)
+      return true
+    end,
+    up = function() return true end,
+    down = function() return true end,
+    select = function(slot) world.drone._selected = slot end,
   }
 
   component.inventory_controller = {
@@ -491,12 +509,8 @@ function M.install(config, sites, opts)
   local computerFake = {
     energy = function() return world.drone.energy end,
     maxEnergy = function() return 1 end,
+    beep = function() end, -- no audio locally; bee_keeper_setup's border-preview signal just no-ops
   }
-
-  -- Wire the fake agent's select() (production code calls
-  -- component.robot/drone.select(n) via bee_keeper_manager's agent()
-  -- helper -- both resolve the same way here since we only expose "drone").
-  component.drone.select = function(slot) world.drone._selected = slot end
 
   package.loaded["sides"] = sidesFake
   package.loaded["component"] = component

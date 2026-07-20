@@ -17,10 +17,10 @@ package.loaded["component"] = {
       return { name = blocksByCell[key] or "minecraft:air" }
     end,
   },
-  drone = {
-    getLightColor = function() return 0 end,
-    setLightColor = function() end,
-  },
+  -- No robot/drone/computer registered -- these tests only exercise
+  -- scanArea directly, never M.run/flyBorderPreview, so isAvailable is
+  -- never consulted.
+  isAvailable = function() return false end,
 }
 
 package.loaded["bee_keeper_nav"] = (function()

@@ -122,28 +122,40 @@ local function printAsciiPreview(width, depth)
   print("       +" .. string.rep("-", cols) .. string.format("+ (%d,%d)", width, depth))
 end
 
--- Flies to all 4 corners of the planned area (relative to current
--- position as origin), flashing the drone's light at each, then returns
--- to the start. Lets you visually confirm the boundary in-world before
--- committing to the full sweep.
+-- Walks to all 4 corners of the planned area (relative to current
+-- position as origin), signaling at each, then returns to the start.
+-- Lets you visually confirm the boundary in-world before committing to
+-- the full sweep. Signal is a light flash (component.drone) if that
+-- component exists, or a beep (component.computer, on any host
+-- including a Robot) otherwise -- checked once, not per corner.
 local function flyBorderPreview(width, depth)
   local corners = { { 0, 0 }, { width, 0 }, { width, depth }, { 0, depth }, { 0, 0 } }
-  local d = component().drone
-  local originalColor = d.getLightColor()
 
-  for i, c in ipairs(corners) do
-    print(string.format("Flying to corner %d/%d: (%d, %d)", i, #corners, c[1], c[2]))
-    local ok, reason = Nav.gotoXZ(c[1], c[2])
-    if not ok then
-      print("  Could not reach corner: " .. tostring(reason))
-    else
+  local d = component().isAvailable("drone") and component().drone or nil
+  local originalColor = d and d.getLightColor()
+  local beep = component().isAvailable("computer") and component().computer.beep or nil
+
+  local function signal()
+    if d then
       d.setLightColor(0x00FF00)
       os.sleep(0.5)
       d.setLightColor(0xFF0000)
       os.sleep(0.5)
+    elseif beep then
+      beep(1000, 0.2)
     end
   end
-  d.setLightColor(originalColor)
+
+  for i, c in ipairs(corners) do
+    print(string.format("Walking to corner %d/%d: (%d, %d)", i, #corners, c[1], c[2]))
+    local ok, reason = Nav.gotoXZ(c[1], c[2])
+    if not ok then
+      print("  Could not reach corner: " .. tostring(reason))
+    else
+      signal()
+    end
+  end
+  if d then d.setLightColor(originalColor) end
 end
 
 -- ============================================================

@@ -35,19 +35,19 @@ return {
   onDiscard = nil,
 
   -- How many slots to try in the storage container before giving up on a
-  -- discard (54 = a double chest).
-  storageSlotCount = 54,
+  -- discard. Confirmed 27 via getInventorySize() -- a single chest.
+  storageSlotCount = 27,
 
   -- Block names the area scan (bee_keeper_setup.lua) treats as "this is an
   -- apiary" / "this is the storage chest", matched against
-  -- geolyzer.analyze(sides.down).name. apiaryBlockNames are still
-  -- UNCONFIRMED BEST GUESSES -- use bee_keeper_setup.probeBlockBelow()
-  -- while hovering over a known apiary to get the real name and fix these
-  -- before running the scan for real. storageBlockNames is just a plain
-  -- chest (MVP -- confirmed vanilla block names, no guessing needed).
+  -- geolyzer.analyze(sides.down).name. "Forestry:apiculture" confirmed via
+  -- probeBlockBelow() against a real apiary -- note the capital F, and
+  -- "apiculture" not "apiary" (both wrong in the earlier guess). If you
+  -- also use an Alveary or Industrial Apiary, probe one of those too --
+  -- no reason to assume they report the same name. storageBlockNames is
+  -- just a plain chest (confirmed vanilla block name, no guessing needed).
   apiaryBlockNames = {
-    "forestry:apiary",
-    "forestry:alveary",
+    "Forestry:apiculture",
   },
   storageBlockNames = {
     "minecraft:chest",
