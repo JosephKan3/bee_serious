@@ -456,6 +456,49 @@ do
   check("the apiary's drone slot actually has a drone too", apiary(DOWN)[2] ~= nil)
 end
 
+-- ============================================================
+-- Test: when cargo holds MULTIPLE princesses, findPrincessCandidate must
+-- pick the best-scoring one to seed, not merely whichever sits in the
+-- lowest-numbered cargo slot. Without this, an apiary visited first
+-- (nearest-neighbor travel order) could get stuck with a genuinely weak
+-- princess purely by scan-order luck, while a much better one sat
+-- unseeded in a higher slot -- exactly what real-hardware observation
+-- flagged: a good princess and a good drone ended up together at one
+-- apiary while a weak princess sat at another, with no actual quality
+-- reasoning behind which apiary got which.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+
+  -- Weak princess deliberately sits in the LOWEST slot number -- old
+  -- scan-order behavior would grab her first regardless of quality.
+  local weakActive, weakInactive = makeAlleles(traitList, {})
+  world.agentInventory[3] = mockPrincessStack(weakActive, weakInactive, true)
+
+  -- Strong (fully purebred-good) princess sits in a HIGHER slot number.
+  local goodTraits = {}
+  for _, t in ipairs(traitList) do goodTraits[t] = Cfg.targets[t].target end
+  local strongActive, strongInactive = makeAlleles(traitList, goodTraits)
+  world.agentInventory[9] = mockPrincessStack(strongActive, strongInactive, true)
+
+  local config = { workingSlots = { 3, 9 }, minCopies = 2 }
+  local site = { name = "multi-princess-site", x = 5, z = 9, mode = "traitmax" }
+
+  local status = M.runQualitySite(config, site)
+  check("runQualitySite seeded a princess", status:match("^seeded princess") ~= nil, status)
+  check("the STRONG princess (slot 9) was selected, not the weak one in the lower slot",
+    world.selectedSlot == 9, "selected=" .. tostring(world.selectedSlot))
+  check("the weak princess was left behind in cargo, untouched",
+    world.agentInventory[3] ~= nil and world.agentInventory[3].name == "Forestry:beePrincessGE")
+  check("progress recorded for the site reflects the strong princess (fully purebred)",
+    site.progress == 1.0, "progress=" .. tostring(site.progress))
+end
+
 do
   world.apiaries = {}
   world.agentInventory = {}

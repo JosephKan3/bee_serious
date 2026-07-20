@@ -248,18 +248,41 @@ local function gatherCandidateDrones(config, traitList, targetSpecies)
   return pool
 end
 
--- Finds an analyzed princess/queen sitting in the agent's own cargo,
--- for seeding an apiary whose queen slot has gone empty (see the
--- no-princess branch in M.runQualitySite below for why this is needed at
--- all). Returns the working slot number, or nil if cargo has none.
-local function findPrincessCandidate(config)
+-- Finds the HIGHEST-QUALITY analyzed princess/queen sitting in the
+-- agent's own cargo, for seeding an apiary whose queen slot has gone
+-- empty (see the no-princess branch in M.runQualitySite below for why
+-- this is needed at all). Scored the same way as the mutation flow's
+-- bestOfSpecies -- picking merely the FIRST candidate found (old
+-- behavior) meant whichever princess happened to sit in the lowest-
+-- numbered cargo slot got stuck in whichever apiary was visited first
+-- (nearest-neighbor travel order), regardless of quality -- a genuinely
+-- better princess could just as easily end up seeded at a LATER site
+-- purely by luck of scan order, leaving a good drone (matched against
+-- her via BB.planGeneration below) paired with a weak princess at the
+-- site visited first, while a stronger princess sat unseeded in cargo.
+-- Scoring here means the best available princess is always seeded
+-- first, and with multiple apiaries needing seeding in the same cycle,
+-- each one (visited in travel order) gets the best REMAINING princess
+-- -- good pairs with good by construction, not accident.
+-- Returns the working slot number, or nil if cargo has no usable
+-- princess/queen at all.
+local function findPrincessCandidate(config, traitList, targetSpecies)
+  local bestSlot, bestScore = nil, -1
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
-    if isPrincessOrQueenStack(stack) and readIndividual(stack) then
-      return slot
+    if isPrincessOrQueenStack(stack) then
+      local individual = readIndividual(stack)
+      if individual then
+        local genotype = Cfg.normalizeGenotype(traitList, individual.active, individual.inactive, targetSpecies)
+        local score = M.purityOf(traitList, genotype)
+        if score > bestScore then
+          bestScore = score
+          bestSlot = slot
+        end
+      end
     end
   end
-  return nil
+  return bestSlot
 end
 
 -- swapDrone/swapQueen hand over the ENTIRE stack sitting in the currently
@@ -315,7 +338,7 @@ function M.runQualitySite(config, site)
     -- princess for traitmax/species sites (only the mutation flow calls
     -- swapQueen), so without this, a site goes permanently idle the
     -- moment its queen runs out.
-    local princessSlot = findPrincessCandidate(config)
+    local princessSlot = findPrincessCandidate(config, traitList, targetSpecies)
     if not princessSlot then
       return "no_princess_at_site_or_in_cargo"
     end
