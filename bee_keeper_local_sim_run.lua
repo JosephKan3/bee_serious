@@ -235,7 +235,7 @@ if uiEnabled then
           col = col + #seg.text
         end
         row = row + 1
-      end)
+      end, config.sites)
     end
   end
   Status.onChange = function()
@@ -280,7 +280,7 @@ for cycle = 1, cycles do
     -- underneath the dashboard.
     if verboseEnabled then
       print(string.format("  [verbose] after cycle %d:", cycle))
-      Sim.dumpWorld()
+      Sim.dumpWorld(nil, config.sites)
     end
   end
 end

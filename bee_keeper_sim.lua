@@ -358,6 +358,10 @@ function M.newWorld(config, sites)
     },
     apiaries = {}, -- key "x:z" -> { princessRaw, droneRaw, workTicks, workNeeded }
     storage = {},
+    -- uid of the drone bee most recently moved (loaded into an apiary or
+    -- discarded), so the verbose dump can flash its item name cyan for
+    -- exactly one redraw -- see formatStackSegments/M.dumpWorld below.
+    recentlyMovedDroneUid = nil,
     mutationRecipes = {
       -- A generous chance so a local demo run actually shows a mutation
       -- succeed within a reasonable number of cycles.
@@ -636,6 +640,7 @@ function M.install(config, sites, opts)
       if atTrash() then
         if slot ~= 1 then return false end
         world.drone.inventory[selected] = nil
+        if isDroneStack(stack) then world.recentlyMovedDroneUid = stack._uid end
         return true
       end
 
@@ -645,6 +650,7 @@ function M.install(config, sites, opts)
         if moved <= 0 then return false end
         stack.size = (stack.size or 1) - moved
         if stack.size <= 0 then world.drone.inventory[selected] = nil end
+        if isDroneStack(stack) then world.recentlyMovedDroneUid = stack._uid end
         return true
       end
 
@@ -781,6 +787,7 @@ function M.install(config, sites, opts)
       a.droneRaw = newDrone and newDrone.individual and rawFromIndividual(newDrone.individual, newDrone._uid) or nil
       world.drone.inventory[selected] = oldDroneRaw and toStack(oldDroneRaw, "drone") or nil
       a.workTicks = 0
+      if newDrone then world.recentlyMovedDroneUid = newDrone._uid end
       return true
     end,
     -- Consumes 1 honey/honeydew from honeySlot (real Forestry: analyzing
@@ -885,6 +892,7 @@ local TRAIT_ABBR = {
 local COLOR_DEFAULT = 0xE0E0E0
 local COLOR_PRINCESS = 0xFF69B4 -- pink
 local COLOR_DRONE = 0xFFA030 -- orange
+local COLOR_DRONE_MOVED = 0x00E0E0 -- cyan, momentary -- see world.recentlyMovedDroneUid
 local COLOR_GOOD = 0x00E000 -- green, matches the "good" allele
 local COLOR_BAD = 0xE00000 -- red, matches the "bad" allele
 
@@ -940,9 +948,21 @@ end
 local function formatStackSegments(stack, showTraits)
   if not stack then return { { text = "empty", color = COLOR_DEFAULT } } end
 
+  -- Princess pink and allele green/red (see traitSegments) always take
+  -- priority -- this only ever affects a plain drone's own name color, and
+  -- only for the one redraw right after it was actually moved (loaded
+  -- into an apiary or discarded); see world.recentlyMovedDroneUid.
   local nameColor = COLOR_DEFAULT
-  if isPrincessOrQueenStack(stack) then nameColor = COLOR_PRINCESS
-  elseif isDroneStack(stack) then nameColor = COLOR_DRONE end
+  if isPrincessOrQueenStack(stack) then
+    nameColor = COLOR_PRINCESS
+  elseif isDroneStack(stack) then
+    local world = M.world
+    if stack._uid and world and stack._uid == world.recentlyMovedDroneUid then
+      nameColor = COLOR_DRONE_MOVED
+    else
+      nameColor = COLOR_DRONE
+    end
+  end
 
   local segments = { { text = stack.name, color = nameColor } }
 
@@ -1005,10 +1025,23 @@ end
 -- position instead, so verbose output can be part of the live
 -- dashboard, not separate scrolling text that would corrupt its
 -- fixed-position redraws.
-function M.dumpWorld(sink)
+--
+-- sites (optional) is config.sites -- used to label each apiary with its
+-- real site name (e.g. "apiary1"), the SAME name Status.setStep uses in
+-- the top step message. Without it, apiaries fall back to being labeled
+-- by their "x:z" key, sorted alphabetically -- which does NOT match site
+-- order/naming and was the source of a real mismatch bug.
+function M.dumpWorld(sink, sites)
   sink = sink or ansiPrintSink
   local world = M.world
   if not world then return end
+
+  local posToName = {}
+  if sites then
+    for _, s in ipairs(sites) do
+      posToName[s.x .. ":" .. s.z] = s.name
+    end
+  end
 
   sink(line(string.format("--- drone/agent --- pos=(%d,%d) facing=%d energy=%.0f%% selected slot=%s",
     world.drone.x, world.drone.z, world.drone.facing, (world.drone.energy or 0) * 100,
@@ -1034,11 +1067,10 @@ function M.dumpWorld(sink)
   sink(line(""))
 
   sink(line("--- apiaries ---"))
-  local apiaryNumber = 0
   for _, key in ipairs(sortedKeys(world.apiaries)) do
-    apiaryNumber = apiaryNumber + 1
     local a = world.apiaries[key]
-    sink(line(string.format("  apiary #%d @ (%s) -- work %d/%d:", apiaryNumber, key, a.workTicks, a.workNeeded)))
+    local label = posToName[key] or key
+    sink(line(string.format("  %s @ (%s) -- work %d/%d:", label, key, a.workTicks, a.workNeeded)))
     sink(append(line("    slot 1 (princess): "),
       a.princessRaw and formatStackSegments(toStack(a.princessRaw, "princess"), true) or line("empty")))
     sink(append(line("    slot 2 (drone): "),
@@ -1053,6 +1085,10 @@ function M.dumpWorld(sink)
     end
     sink(line(""))
   end
+
+  -- "Momentarily" cyan: shown for exactly this one dump, then reverts --
+  -- see world.recentlyMovedDroneUid and formatStackSegments above.
+  world.recentlyMovedDroneUid = nil
 end
 
 return M
