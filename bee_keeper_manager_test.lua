@@ -839,6 +839,29 @@ do
 end
 
 -- ============================================================
+-- Test: matches on stack.label ("Honey Drop") too, not just stack.name
+-- -- a real-hardware pack could register the item under an internal id
+-- that doesn't literally contain "honey"/"honeydew" even though its
+-- display label obviously does (or vice versa). Checking only one risks
+-- a silent miss.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 0, z = 0 }
+  -- Deliberately obscure registered name, but a real display label.
+  apiary(DOWN)[1] = { name = "gtnh:item.12345", label = "Honey Drop", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockHoney(config)
+  check("restockHoney matches an item by LABEL when the name is obscure",
+    restocked == true)
+end
+
+-- ============================================================
 -- Test: resolveWorkingSlots auto-derives from the robot's real inventory
 -- size (mocked at 15 -- see getInventorySize above) when
 -- config.workingSlots isn't explicitly set, instead of a fixed hardcoded

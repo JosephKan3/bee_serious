@@ -879,16 +879,27 @@ end
 -- (see M.analyzeWorkingSlots, which tries restocking from storage first
 -- and only falls back to the configured slot as an absolute last
 -- resort).
+-- Matches on EITHER the registered item name (stack.name, e.g.
+-- "forestry:honey_drop") OR the display label (stack.label, e.g. "Honey
+-- Drop") -- checking name alone risks a silent miss if this pack's
+-- actual Forestry build registers honey/honeydew under an ID that
+-- doesn't literally contain either substring even though its label
+-- obviously does (or vice versa). Widening the match can only catch
+-- MORE real honey, never cause a false positive on an unrelated item
+-- (nothing else is remotely likely to have "honey"/"honeydew" in either
+-- its id or its display name).
+local function looksLikeHoney(stack)
+  if not stack then return false end
+  local name = stack.name and stack.name:lower() or ""
+  local label = stack.label and stack.label:lower() or ""
+  return name:find("honey") or name:find("honeydew") or label:find("honey") or label:find("honeydew")
+end
+
 local function searchForHoney()
   local size = robotLib().inventorySize() or 16
   for slot = 1, size do
     local stack = invCtrl().getStackInInternalSlot(slot)
-    if stack and stack.name then
-      local lower = stack.name:lower()
-      if lower:find("honey") or lower:find("honeydew") then
-        return slot
-      end
-    end
+    if looksLikeHoney(stack) then return slot end
   end
   return nil
 end
@@ -904,12 +915,7 @@ local function countHoneyInCargo()
   local total = 0
   for slot = 1, size do
     local stack = invCtrl().getStackInInternalSlot(slot)
-    if stack and stack.name then
-      local lower = stack.name:lower()
-      if lower:find("honey") or lower:find("honeydew") then
-        total = total + (stack.size or 1)
-      end
-    end
+    if looksLikeHoney(stack) then total = total + (stack.size or 1) end
   end
   return total
 end
@@ -960,21 +966,18 @@ function M.restockHoney(config)
   local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
   for slot = 1, size do
     local stack = invCtrl().getStackInSlot(down, slot)
-    if stack and stack.name then
-      local lower = stack.name:lower()
-      if lower:find("honey") or lower:find("honeydew") then
-        agent().select(freeSlot)
-        local moved = invCtrl().suckFromSlot(down, slot, 64)
-        if moved and moved > 0 then return true end
-        -- Matched by name, but suckFromSlot moved nothing -- fires
-        -- immediately, not gated by diagRestockDumped, since this is a
-        -- much more specific/unusual failure worth seeing right away
-        -- (e.g. the destination slot rejected it, or the source
-        -- reported a stack that wasn't actually still there).
-        print(string.format(
-          "[restock-diag] matched slot %d (%s x%s) by name, but suckFromSlot(side=%s, slot=%d, count=64) into freeSlot=%d moved %s",
-          slot, tostring(stack.name), tostring(stack.size), tostring(down), slot, freeSlot, tostring(moved)))
-      end
+    if looksLikeHoney(stack) then
+      agent().select(freeSlot)
+      local moved = invCtrl().suckFromSlot(down, slot, 64)
+      if moved and moved > 0 then return true end
+      -- Matched by name/label, but suckFromSlot moved nothing -- fires
+      -- immediately, not gated by diagRestockDumped, since this is a
+      -- much more specific/unusual failure worth seeing right away
+      -- (e.g. the destination slot rejected it, or the source
+      -- reported a stack that wasn't actually still there).
+      print(string.format(
+        "[restock-diag] matched slot %d (name=%s label=%s x%s) but suckFromSlot(side=%s, slot=%d, count=64) into freeSlot=%d moved %s",
+        slot, tostring(stack.name), tostring(stack.label), tostring(stack.size), tostring(down), slot, freeSlot, tostring(moved)))
     end
   end
 
