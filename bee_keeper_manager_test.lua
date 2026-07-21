@@ -1232,6 +1232,76 @@ do
     apiary(DOWN)[2] ~= nil and apiary(DOWN)[2].name == "forestry:honey_drop")
 end
 
+-- ============================================================
+-- Test: restockFromStorage MERGES into an existing matching cargo stack
+-- instead of always claiming a fresh empty slot -- reported as real
+-- behavior: bees weren't auto-stacking in cargo when pulled back from
+-- storage, always spreading across separate slots one at a time even
+-- when an identical bee was already sitting there.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+
+  local matchingActive, matchingInactive = { fertility = 3 }, { fertility = 3 }
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = mockBeeStack(matchingActive, matchingInactive, true)
+  world.dronePos = { x = 99, z = 99 }
+
+  -- Cargo slot 11 already holds a genetically IDENTICAL bee -- should be
+  -- the merge target. Slot 12 is empty and should be left untouched.
+  world.agentInventory[11] = mockBeeStack(matchingActive, matchingInactive, true)
+
+  local config = {
+    workingSlots = { 11, 12 },
+    storagePos = { x = 0, z = 0 },
+    storageSlotCount = 10,
+  }
+
+  local restocked = M.restockFromStorage(config)
+  check("restockFromStorage restocked the matching bee", restocked == 1, "restocked=" .. tostring(restocked))
+  check("restockFromStorage merged into the existing matching stack (slot 11), growing it",
+    world.agentInventory[11] ~= nil and (world.agentInventory[11].size or 1) > 1,
+    "slot 11 size=" .. tostring(world.agentInventory[11] and world.agentInventory[11].size))
+  check("restockFromStorage left the empty slot 12 untouched", world.agentInventory[12] == nil)
+end
+
+-- ============================================================
+-- Test: restockFromStorage requests the WHOLE stacked quantity, not a
+-- hardcoded 1 -- a storage slot holding several identical stacked bees
+-- (they stack, same as cargo) should give them all up in one visit.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 99, z = 99 }
+
+  local active, inactive = { fertility = 2 }, { fertility = 2 }
+  local stackedBee = mockBeeStack(active, inactive, true)
+  stackedBee.size = 5
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = stackedBee
+  world.dronePos = { x = 99, z = 99 }
+
+  local config = { workingSlots = { 11, 12 }, storagePos = { x = 0, z = 0 }, storageSlotCount = 10 }
+
+  local requestedCount = nil
+  local origSuckFromSlot = mockComponent.inventory_controller.suckFromSlot
+  mockComponent.inventory_controller.suckFromSlot = function(side, slot, count)
+    requestedCount = count
+    return origSuckFromSlot(side, slot, count)
+  end
+
+  M.restockFromStorage(config)
+  mockComponent.inventory_controller.suckFromSlot = origSuckFromSlot
+
+  check("restockFromStorage requests the WHOLE stack (5), not a hardcoded 1",
+    requestedCount == 5, "requested=" .. tostring(requestedCount))
+end
+
 do
   -- No free working slots -- should not even attempt the trip.
   world.apiaries = {}

@@ -852,11 +852,18 @@ end
 function M.restockFromStorage(config)
   if not config.storagePos then return 0 end
 
-  local freeSlots = {}
+  -- Cheap upfront check -- not worth a whole trip if cargo has zero
+  -- room to receive anything at all. (Once there, actual destination
+  -- selection also considers merging into an existing matching stack,
+  -- not just this empty-slot count -- see findStackingSlot below.)
+  local hasFreeSlot = false
   for _, slot in ipairs(config.workingSlots) do
-    if invCtrl().getStackInInternalSlot(slot) == nil then table.insert(freeSlots, slot) end
+    if invCtrl().getStackInInternalSlot(slot) == nil then
+      hasFreeSlot = true
+      break
+    end
   end
-  if #freeSlots == 0 then return 0 end
+  if not hasFreeSlot then return 0 end
 
   Status.setStep("Restocking from storage")
   local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
@@ -865,16 +872,21 @@ function M.restockFromStorage(config)
   local down = sides().down
   local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
   local restocked = 0
-  local freeIdx = 1
   for slot = 1, size do
-    if freeIdx > #freeSlots then break end
     local stack = invCtrl().getStackInSlot(down, slot)
     if stack and readIndividual(stack) then
-      agent().select(freeSlots[freeIdx])
-      local moved = invCtrl().suckFromSlot(down, slot, 1)
-      if moved and moved > 0 then
-        restocked = restocked + 1
-        freeIdx = freeIdx + 1
+      -- Prefers merging into an existing matching, not-yet-full cargo
+      -- stack over always claiming a fresh empty slot -- without this,
+      -- a restocked bee never stacked together with an identical one
+      -- already sitting in cargo, one at a time forever.
+      local destSlot = findStackingSlot(invCtrl().getStackInInternalSlot, config.workingSlots, stack)
+      if destSlot then
+        agent().select(destSlot)
+        -- Pulls the WHOLE matching stack in one go, not a hardcoded 1
+        -- -- otherwise several identical bees stacked in one storage
+        -- slot only ever gave up one unit per visit.
+        local moved = invCtrl().suckFromSlot(down, slot, stack.size or 1)
+        if moved and moved > 0 then restocked = restocked + 1 end
       end
     end
   end
