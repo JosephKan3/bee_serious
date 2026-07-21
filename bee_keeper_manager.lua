@@ -903,11 +903,24 @@ function M.restockHoney(config)
   local honeyPos = config.honeyStoragePos or config.storagePos
   if not honeyPos then return false end
 
+  -- Prefer refilling config.honeySlot itself if it's empty. Once its
+  -- honey is fully consumed the slot becomes empty too, but it's
+  -- deliberately excluded from config.workingSlots (M.resolveWorkingSlots
+  -- keeps it out of the breeding-candidate pool on purpose), so a search
+  -- limited to workingSlots would never even consider it. Real hardware
+  -- hit exactly this: once cargo filled up with banked drones/princesses
+  -- (leaving no free WORKING slot at all), restocking honey failed
+  -- outright even though the most natural destination -- honeySlot
+  -- itself -- was sitting right there, empty, ready to be refilled.
   local freeSlot = nil
-  for _, slot in ipairs(config.workingSlots) do
-    if invCtrl().getStackInInternalSlot(slot) == nil then
-      freeSlot = slot
-      break
+  if config.honeySlot and invCtrl().getStackInInternalSlot(config.honeySlot) == nil then
+    freeSlot = config.honeySlot
+  else
+    for _, slot in ipairs(config.workingSlots) do
+      if invCtrl().getStackInInternalSlot(slot) == nil then
+        freeSlot = slot
+        break
+      end
     end
   end
   if not freeSlot then return false end

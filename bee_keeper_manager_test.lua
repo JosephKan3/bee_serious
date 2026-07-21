@@ -755,10 +755,49 @@ do
   local analyzed = M.analyzeWorkingSlots(config)
   check("analyzeWorkingSlots restocked honey from storage and analyzed successfully",
     analyzed == 1, "analyzed=" .. tostring(analyzed))
-  check("the fetched honey landed in a free working slot (2), not honeySlot",
-    world.agentInventory[2] ~= nil and world.agentInventory[2].name == "forestry:honey_drop")
-  check("analyzeWorkingSlots used the RESTOCKED honey slot, not the empty configured one",
-    world.lastHoneySlotUsed == 2, "used=" .. tostring(world.lastHoneySlotUsed))
+  -- Prefers refilling the ORIGINAL honeySlot (it's empty, and it's the
+  -- most natural destination) over claiming a working slot that could
+  -- otherwise hold a real breeding candidate.
+  check("the fetched honey landed back in honeySlot (20), not a working slot",
+    world.agentInventory[20] ~= nil and world.agentInventory[20].name == "forestry:honey_drop")
+  check("working slot 2 was left free, not consumed by the restock",
+    world.agentInventory[2] == nil)
+  check("analyzeWorkingSlots used the RESTOCKED honeySlot",
+    world.lastHoneySlotUsed == 20, "used=" .. tostring(world.lastHoneySlotUsed))
+end
+
+-- ============================================================
+-- Test: restockHoney must succeed even when EVERY working slot is
+-- occupied (a long real run's cargo filling up with banked drones/
+-- princesses) as long as config.honeySlot itself is empty -- the real-
+-- hardware bug this fixes: a search limited to workingSlots (which
+-- deliberately excludes honeySlot -- see M.resolveWorkingSlots) would
+-- never even consider the empty honeySlot as a valid destination, so
+-- restocking failed outright and analysis permanently stopped working,
+-- even though the most natural destination was sitting right there,
+-- empty, ready to be refilled.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.lastHoneySlotUsed = nil
+
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = { name = "forestry:honey_drop", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+
+  -- EVERY working slot occupied -- no room anywhere except honeySlot.
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+  world.agentInventory[2] = mockBeeStack({ fertility = 2 }, { fertility = 2 }, true)
+  -- honeySlot (20) is empty -- its honey ran out.
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockHoney(config)
+  check("restockHoney succeeds using the empty honeySlot even with zero free working slots",
+    restocked == true)
+  check("honey landed in honeySlot", world.agentInventory[20] ~= nil)
 end
 
 do
