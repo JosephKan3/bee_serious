@@ -1090,6 +1090,44 @@ function M.analyzeWorkingSlots(config)
   return analyzed
 end
 
+-- Sweeps ALL of cargo for stacks that could merge together but haven't
+-- -- e.g. two already-analyzed stacks with identical alleles that came
+-- from different originating batches. Forestry bee items with
+-- different isAnalyzed states never stack even with identical alleles,
+-- so a freshly-harvested unanalyzed bee correctly couldn't merge with
+-- an already-analyzed matching stack when it first arrived -- but real
+-- Minecraft doesn't auto-re-stack two existing separate slots just
+-- because their NBT now happens to agree once it's analyzed too, and
+-- neither does merely reacting to THAT one transition: two stacks that
+-- were EACH ALREADY analyzed from separate origins never get a "just
+-- changed state" moment to trigger against each other at all. This is
+-- a general, unconditional sweep instead -- purely cargo bookkeeping,
+-- no travel needed. Confirmed as the real bug: the same exact genotype
+-- ended up scattered across many separate cargo slots instead of one
+-- consolidated stack, and only reacting to the analyze-transition still
+-- left several of them un-merged with each other.
+function M.consolidateCargo(config)
+  local merged = 0
+  for i, slotA in ipairs(config.workingSlots) do
+    local a = invCtrl().getStackInInternalSlot(slotA)
+    if a and (a.size or 1) < (a.maxSize or 64) then
+      for j = i + 1, #config.workingSlots do
+        local slotB = config.workingSlots[j]
+        local b = invCtrl().getStackInInternalSlot(slotB)
+        if b and stacksMatch(a, b) then
+          agent().select(slotB)
+          if agent().transferTo(slotA) then
+            merged = merged + 1
+            a = invCtrl().getStackInInternalSlot(slotA) -- refresh: size just grew
+            if not a or (a.size or 1) >= (a.maxSize or 64) then break end
+          end
+        end
+      end
+    end
+  end
+  return merged
+end
+
 -- ============================================================
 -- Working slots: if config.workingSlots isn't explicitly set, use every
 -- slot from 1 to the robot's REAL inventory size except honeySlot,
@@ -1219,6 +1257,13 @@ function M.runCycle(config)
     -- nothing new to harvest.
     M.harvestSite(config, site)
   end
+
+  -- Cheap, no travel -- pure cargo bookkeeping. Catches anything that
+  -- couldn't merge earlier (e.g. a freshly-analyzed bee alongside an
+  -- already-analyzed matching stack from a different batch) once per
+  -- cycle, after all this cycle's harvesting/analyzing/breeding is
+  -- done.
+  M.consolidateCargo(config)
 
   -- If any site came up genuinely empty-handed this cycle, storage might
   -- still have something usable sitting in it -- one bounded trip (not

@@ -108,21 +108,31 @@ mockComponent.robot = {
   -- models the real robot.transferTo(slot, [count]) used by
   -- ensureSingleItemSlot to peel exactly one drone off a stacked slot
   -- before swapDrone, instead of handing over the whole stack.
+  -- Merges into whatever's ALREADY in toSlot, matching real
+  -- robot.transferTo behavior (an inventory slot move, same as any
+  -- other) -- overwriting outright would silently discard an existing
+  -- stack there instead of growing it.
   transferTo = function(toSlot, count)
     local from = world.selectedSlot
     local stack = world.agentInventory[from]
     if not stack then return false end
     local size = stack.size or 1
     local moveCount = count or size
-    if moveCount >= size then
+    local existing = world.agentInventory[toSlot]
+    if existing then
+      existing.size = (existing.size or 1) + moveCount
+    elseif moveCount >= size then
       world.agentInventory[toSlot] = stack
-      world.agentInventory[from] = nil
     else
       local newStack = {}
       for k, v in pairs(stack) do newStack[k] = v end
       newStack.size = moveCount
-      stack.size = size - moveCount
       world.agentInventory[toSlot] = newStack
+    end
+    if moveCount >= size then
+      world.agentInventory[from] = nil
+    else
+      stack.size = size - moveCount
     end
     return true
   end,
@@ -1403,6 +1413,53 @@ do
   M.analyzeWorkingSlots(config)
   check("config.honeyCount decremented once per successful analyze",
     config.honeyCount == 3, "honeyCount=" .. tostring(config.honeyCount))
+end
+
+-- ============================================================
+-- Test: M.consolidateCargo merges together any matching cargo stacks
+-- that could combine but haven't -- e.g. two already-analyzed stacks
+-- with identical alleles that came from separate originating batches
+-- and never had a "just changed state" moment to trigger against each
+-- other. Forestry bee items with different isAnalyzed states never
+-- stack even with identical alleles -- so a freshly-harvested
+-- unanalyzed bee correctly couldn't merge with an already-analyzed
+-- matching stack elsewhere in cargo when it first arrived, and once
+-- analyzed itself, still wouldn't automatically re-merge with THAT
+-- stack (real Minecraft doesn't auto-re-stack two existing separate
+-- slots just because their NBT now happens to agree) -- confirmed as
+-- the real observed bug: the exact same genotype ended up scattered
+-- across MANY separate cargo slots instead of one consolidated stack,
+-- and reacting only to the moment one bee gets analyzed still isn't
+-- enough once several already-analyzed groups exist independently.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+
+  local matching = { fertility = 4 }
+  -- Three SEPARATE already-analyzed stacks, all genetically identical
+  -- -- as if they arrived from three different breeding batches, never
+  -- merging with each other along the way.
+  world.agentInventory[1] = mockBeeStack(matching, matching, true)
+  world.agentInventory[1].size = 3
+  world.agentInventory[2] = mockBeeStack(matching, matching, true)
+  world.agentInventory[2].size = 2
+  world.agentInventory[3] = mockBeeStack(matching, matching, true)
+  world.agentInventory[3].size = 1
+  -- A genuinely different bee should never get folded in.
+  world.agentInventory[4] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true)
+
+  local config = { workingSlots = { 1, 2, 3, 4 } }
+  local merged = M.consolidateCargo(config)
+
+  check("consolidateCargo merged the two redundant matching stacks", merged == 2, "merged=" .. tostring(merged))
+  check("slot 1 absorbed both other matching stacks (3+2+1=6)",
+    world.agentInventory[1] ~= nil and world.agentInventory[1].size == 6,
+    "slot 1 size=" .. tostring(world.agentInventory[1] and world.agentInventory[1].size))
+  check("slots 2 and 3 are now empty", world.agentInventory[2] == nil and world.agentInventory[3] == nil)
+  check("the genuinely different bee in slot 4 was left alone",
+    world.agentInventory[4] ~= nil and (world.agentInventory[4].size or 1) == 1)
 end
 
 -- ============================================================

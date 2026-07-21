@@ -711,22 +711,26 @@ function M.install(config, sites, opts)
     -- bee_keeper_manager.lua's ensureSingleItemSlot to peel exactly one
     -- drone off a stacked slot before swapDrone, instead of handing over
     -- the whole stack.
+    -- Merges into whatever's ALREADY in toSlot if it matches (real
+    -- robot.transferTo behaves like any other inventory slot move --
+    -- it merges into a compatible existing stack, same as
+    -- suckFromSlot/dropIntoSlot elsewhere in this file). Previously
+    -- this just overwrote toSlot outright, silently discarding
+    -- whatever was already there -- harmless for ensureSingleItemSlot's
+    -- use (always targets a slot it already confirmed is empty), but
+    -- broke M.analyzeWorkingSlots' post-analysis re-consolidation
+    -- (moving a freshly-analyzed bee into an existing matching analyzed
+    -- stack) by destroying the destination stack instead of growing it.
     transferTo = function(toSlot, count)
       local from = world.drone._selected
       local stack = world.drone.inventory[from]
       if not stack then return false end
       local size = stack.size or 1
       local moveCount = count or size
-      if moveCount >= size then
-        world.drone.inventory[toSlot] = stack
-        world.drone.inventory[from] = nil
-      else
-        local newStack = {}
-        for k, v in pairs(stack) do newStack[k] = v end
-        newStack.size = moveCount
-        stack.size = size - moveCount
-        world.drone.inventory[toSlot] = newStack
-      end
+      local moved = depositInto(world.drone.inventory, toSlot, stack, moveCount)
+      if moved <= 0 then return false end
+      stack.size = size - moved
+      if stack.size <= 0 then world.drone.inventory[from] = nil end
       return true
     end,
   }
