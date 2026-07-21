@@ -952,6 +952,22 @@ M.countHoneyInCargo = countHoneyInCargo
 -- empty/mismatched storage doesn't flood the log every cycle.
 local diagRestockDumped = false
 
+-- Tracks which early-return REASONS restockHoney has already logged
+-- once (keyed by reason string), so a persistent condition (e.g.
+-- config.honeySlot never set) doesn't flood the log every cycle, but a
+-- DIFFERENT reason on a later call still gets its own one-time print.
+-- Every prior restockHoney fix addressed one specific failure mode
+-- (destination selection, label matching, ...) but most of its early
+-- returns were completely silent -- no way to tell WHICH one is
+-- actually happening this time without seeing it logged directly.
+local diagRestockReasonsLogged = {}
+local function logRestockFailure(reason)
+  if not diagRestockReasonsLogged[reason] then
+    diagRestockReasonsLogged[reason] = true
+    print("[restock-diag] restockHoney gave up: " .. reason)
+  end
+end
+
 -- Flies to a honey source (config.honeyStoragePos, a dedicated location
 -- if you keep honey separate from general storage, falling back to
 -- config.storagePos) and pulls a full stack back into config.honeySlot
@@ -961,7 +977,10 @@ local diagRestockDumped = false
 -- would just silently stop working forever.
 function M.restockHoney(config)
   local honeyPos = config.honeyStoragePos or config.storagePos
-  if not honeyPos then return false end
+  if not honeyPos then
+    logRestockFailure("no config.honeyStoragePos or config.storagePos known")
+    return false
+  end
 
   -- ALWAYS targets config.honeySlot specifically, never some other
   -- working slot. Confirmed on real hardware: beekeeper.analyze() only
@@ -970,20 +989,32 @@ function M.restockHoney(config)
   -- ignores honey sitting anywhere else. Landing restocked honey in a
   -- different (merely empty, or partially-stocked) working slot would
   -- just be inert cargo clutter analyze() can never actually use.
-  if not config.honeySlot then return false end
+  if not config.honeySlot then
+    logRestockFailure("config.honeySlot is not set at all")
+    return false
+  end
   local existing = invCtrl().getStackInInternalSlot(config.honeySlot)
   if existing and not looksLikeHoney(existing) then
     -- Something else is occupying the honey slot -- not ours to use.
+    logRestockFailure(string.format(
+      "config.honeySlot (%d) is occupied by something that isn't honey: name=%s label=%s",
+      config.honeySlot, tostring(existing.name), tostring(existing.label)))
     return false
   end
   if existing and (existing.size or 1) >= (existing.maxSize or 64) then
+    logRestockFailure(string.format("config.honeySlot (%d) is already full (%s/%s)",
+      config.honeySlot, tostring(existing.size), tostring(existing.maxSize)))
     return false -- already full, nothing to restock
   end
   local freeSlot = config.honeySlot
 
   Status.setStep("Fetching honey from storage")
-  local ok = Nav.gotoXZ(honeyPos.x, honeyPos.z)
-  if not ok then return false end
+  local ok, navReason = Nav.gotoXZ(honeyPos.x, honeyPos.z)
+  if not ok then
+    logRestockFailure(string.format("failed to navigate to honey position (%s,%s): %s",
+      tostring(honeyPos.x), tostring(honeyPos.z), tostring(navReason)))
+    return false
+  end
 
   local down = sides().down
   local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
@@ -1210,8 +1241,11 @@ function M.runCycle(config)
     -- or below the threshold.
     config.honeyCount = countHoneyInCargo()
     if config.honeyCount <= (config.honeyRestockThreshold or 5) then
+      print(string.format("[restock-diag] proactive check: verified honeyCount=%d <= threshold=%d, attempting restock",
+        config.honeyCount, config.honeyRestockThreshold or 5))
       if M.restockHoney(config) then
         config.honeyCount = countHoneyInCargo()
+        print("[restock-diag] proactive restock succeeded, honeyCount now " .. config.honeyCount)
       end
     end
   end
