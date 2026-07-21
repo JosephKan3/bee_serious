@@ -893,6 +893,11 @@ local function searchForHoney()
   return nil
 end
 
+-- Tracks whether the "nothing matched honey/honeydew by name" full dump
+-- (see M.restockHoney below) has already fired once, so a persistently
+-- empty/mismatched storage doesn't flood the log every cycle.
+local diagRestockDumped = false
+
 -- Flies to a honey source (config.honeyStoragePos, a dedicated location
 -- if you keep honey separate from general storage, falling back to
 -- config.storagePos) and pulls a full stack back into a free working
@@ -939,9 +944,39 @@ function M.restockHoney(config)
         agent().select(freeSlot)
         local moved = invCtrl().suckFromSlot(down, slot, 64)
         if moved and moved > 0 then return true end
+        -- Matched by name, but suckFromSlot moved nothing -- fires
+        -- immediately, not gated by diagRestockDumped, since this is a
+        -- much more specific/unusual failure worth seeing right away
+        -- (e.g. the destination slot rejected it, or the source
+        -- reported a stack that wasn't actually still there).
+        print(string.format(
+          "[restock-diag] matched slot %d (%s x%s) by name, but suckFromSlot(side=%s, slot=%d, count=64) into freeSlot=%d moved %s",
+          slot, tostring(stack.name), tostring(stack.size), tostring(down), slot, freeSlot, tostring(moved)))
       end
     end
   end
+
+  -- One-time full dump if NOTHING in the whole inventory ever matched
+  -- "honey"/"honeydew" by name -- same reasoning as M.harvestSite's own
+  -- "harvest-diag-full" dump: catches a real-hardware naming mismatch
+  -- (this pack's actual item name/label not containing either substring)
+  -- directly in the log, instead of restockHoney just silently
+  -- returning false forever with zero forensic information.
+  if not diagRestockDumped then
+    diagRestockDumped = true
+    local dump = { string.format("[restock-diag-full] %s: dumping all %d slots, nothing matched honey/honeydew by name:",
+      tostring(honeyPos and (honeyPos.x .. "," .. honeyPos.z)), size) }
+    for slot = 1, size do
+      local stack = invCtrl().getStackInSlot(down, slot)
+      if stack then
+        table.insert(dump, string.format("  slot %d: name=%s label=%s x%s",
+          slot, tostring(stack.name), tostring(stack.label), tostring(stack.size)))
+      end
+    end
+    if #dump == 1 then table.insert(dump, "  (every slot reported empty)") end
+    print(table.concat(dump, "\n"))
+  end
+
   return false
 end
 

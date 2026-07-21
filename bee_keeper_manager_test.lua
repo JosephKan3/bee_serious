@@ -815,6 +815,30 @@ do
 end
 
 -- ============================================================
+-- Test: storage has real items but NOTHING matches "honey"/"honeydew"
+-- by name -- exercises the diagnostic full-dump path (see
+-- M.restockHoney's diagRestockDumped block), which exists precisely to
+-- surface a real-hardware item-naming mismatch in the log instead of
+-- restockHoney just silently returning false forever with no forensic
+-- information. Just needs to run without erroring and report failure
+-- honestly.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, true) -- NOT honey
+  world.dronePos = { x = 5, z = 5 }
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+
+  local config = { workingSlots = { 1 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockHoney(config)
+  check("restockHoney reports failure honestly when nothing in storage matches honey/honeydew",
+    restocked == false)
+end
+
+-- ============================================================
 -- Test: resolveWorkingSlots auto-derives from the robot's real inventory
 -- size (mocked at 15 -- see getInventorySize above) when
 -- config.workingSlots isn't explicitly set, instead of a fixed hardcoded
