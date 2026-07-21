@@ -1174,6 +1174,63 @@ do
 end
 
 -- ============================================================
+-- Test: runCycle restocks honey PROACTIVELY, before any site is even
+-- visited, when the tracked config.honeyCount is low -- rather than
+-- only reacting after a site's own analysis attempt discovers cargo is
+-- empty. Reported on real hardware: honey restocked successfully once,
+-- then silently stopped restocking on later runs -- a tracked counter,
+-- checked up front every cycle, doesn't depend on a real-hardware scan
+-- correctly re-detecting "empty" the same way twice.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.gotoLog = {}
+  world.dronePos = { x = 0, z = 0 } -- seed honey at the storage position
+  apiary(DOWN)[1] = { name = "forestry:honey_drop", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+
+  local config = {
+    workingSlots = { 10, 11 },
+    honeySlot = 1,
+    honeyCount = 0, -- tracked as already depleted
+    storagePos = { x = 0, z = 0 },
+    sites = { { name = "site1", x = 5, z = 5, mode = "traitmax" } },
+  }
+
+  M.runCycle(config)
+
+  local firstStorageIdx, firstSiteIdx = nil, nil
+  for i, pos in ipairs(world.gotoLog) do
+    if pos == "0:0" and not firstStorageIdx then firstStorageIdx = i end
+    if pos == "5:5" and not firstSiteIdx then firstSiteIdx = i end
+  end
+  check("runCycle visited storage for honey BEFORE visiting any site",
+    firstStorageIdx ~= nil and firstSiteIdx ~= nil and firstStorageIdx < firstSiteIdx,
+    "gotoLog=" .. table.concat(world.gotoLog, ","))
+  check("config.honeyCount was true'd up to the real amount after restocking",
+    config.honeyCount == 64, "honeyCount=" .. tostring(config.honeyCount))
+end
+
+do
+  -- Decrements on each successful analyze -- the running estimate that
+  -- drives the proactive check above.
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.analyzeCalls = 0
+  world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+  world.agentInventory[2] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false)
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, honeyCount = 5 }
+  world.agentInventory[20] = { name = "forestry:honey_drop", size = 64 }
+
+  M.analyzeWorkingSlots(config)
+  check("config.honeyCount decremented once per successful analyze",
+    config.honeyCount == 3, "honeyCount=" .. tostring(config.honeyCount))
+end
+
+-- ============================================================
 -- Test: loadSites merges persisted (x,z) with mode/targetSpecies overrides
 -- ============================================================
 

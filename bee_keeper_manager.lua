@@ -893,6 +893,28 @@ local function searchForHoney()
   return nil
 end
 
+-- Sums EVERY honey/honeydew stack currently in cargo (not just the
+-- first one found -- see searchForHoney), across the robot's FULL
+-- inventory. Used to seed/true-up config.honeyCount, the running
+-- estimate M.runCycle checks proactively each cycle (see its header
+-- notes) instead of only reacting after a site's own analysis attempt
+-- already discovers cargo is empty.
+local function countHoneyInCargo()
+  local size = robotLib().inventorySize() or 16
+  local total = 0
+  for slot = 1, size do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    if stack and stack.name then
+      local lower = stack.name:lower()
+      if lower:find("honey") or lower:find("honeydew") then
+        total = total + (stack.size or 1)
+      end
+    end
+  end
+  return total
+end
+M.countHoneyInCargo = countHoneyInCargo
+
 -- Tracks whether the "nothing matched honey/honeydew by name" full dump
 -- (see M.restockHoney below) has already fired once, so a persistently
 -- empty/mismatched storage doesn't flood the log every cycle.
@@ -986,6 +1008,7 @@ function M.analyzeWorkingSlots(config)
   if not honeySlot then
     -- Cargo genuinely has none -- try fetching more before giving up.
     if M.restockHoney(config) then
+      config.honeyCount = countHoneyInCargo()
       honeySlot = searchForHoney()
     end
   end
@@ -998,10 +1021,24 @@ function M.analyzeWorkingSlots(config)
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
     if stack and stack.individual and not stack.individual.isAnalyzed then
+      -- Honey ran out partway through THIS SAME batch (several
+      -- unanalyzed bees in one visit, more than one stack's worth of
+      -- honey) -- restock immediately, high priority, rather than
+      -- leaving the rest of this visit's bees unanalyzed until some
+      -- unrelated later cycle happens to trigger a restock.
+      if config.honeyCount and config.honeyCount <= 0 then
+        if M.restockHoney(config) then
+          config.honeyCount = countHoneyInCargo()
+          honeySlot = searchForHoney() or honeySlot
+        end
+      end
       Status.setStep("Analyzing bee in slot " .. slot)
       agent().select(slot)
       local ok = beekeeper().analyze(honeySlot)
-      if ok then analyzed = analyzed + 1 end
+      if ok then
+        analyzed = analyzed + 1
+        if config.honeyCount then config.honeyCount = math.max(0, config.honeyCount - 1) end
+      end
     end
   end
   return analyzed
@@ -1060,6 +1097,31 @@ end
 -- call -- direct flight, minimize travel, not fixed list order).
 function M.runCycle(config)
   local log = {}
+
+  -- Proactive, HIGH-PRIORITY honey restock -- config.honeyCount is a
+  -- running estimate (persists on the config table across cycles),
+  -- seeded by a real scan the first time it's unknown, then kept in
+  -- sync incrementally: decremented once per successful analyze() (see
+  -- M.analyzeWorkingSlots), and true-up'd via a fresh countHoneyInCargo()
+  -- scan after any successful restock trip. Checked here BEFORE any
+  -- site is even visited, so a low stock gets topped up first thing,
+  -- rather than only reacting after a site's own analysis attempt
+  -- already discovers cargo is empty (which, on real hardware, could
+  -- mean re-scanning the wrong thing or missing a restock opportunity
+  -- entirely -- reported: honey restocked successfully once, then
+  -- stopped restocking on subsequent runs). config.honeyRestockThreshold
+  -- (default 5) is a buffer, not zero -- a single visit can need
+  -- several honey units at once (multiple unanalyzed bees), so topping
+  -- up a little early avoids running out mid-visit.
+  if config.honeyCount == nil then
+    config.honeyCount = countHoneyInCargo()
+  end
+  if config.honeyCount <= (config.honeyRestockThreshold or 5) then
+    if M.restockHoney(config) then
+      config.honeyCount = countHoneyInCargo()
+    end
+  end
+
   -- ONE pass per site -- harvest, analyze, then decide/act, all before
   -- moving on to the next apiary. Previously this was TWO full sweeps
   -- (harvest every site, THEN decide/act at every site), which meant an
