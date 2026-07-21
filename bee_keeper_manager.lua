@@ -419,30 +419,44 @@ function M.runQualitySite(config, site)
   local swapped = beekeeper().swapDrone(down)
   if not swapped then return "swap_drone_failed" end
 
-  -- Discard drones the plan doesn't want, to make room. Default behavior:
-  -- fly them to config.trashPos (permanently voided -- see M.dumpToTrash)
-  -- if known, else config.storagePos (see M.dumpToStorage) -- trash is
-  -- preferred when both are known, since a breeding program generates a
-  -- steady stream of unwanted drones that would otherwise slowly fill up
-  -- a finite storage chest. Override config.onDiscard to route elsewhere
-  -- entirely (sampler/furnace/junk). No trip back to the site afterward
-  -- needed -- the apiary is already fully loaded, and wherever this
-  -- discard trip ends is a perfectly fine place to start the next site's
-  -- travel from.
   local discardCount = 0
   for _, entry in ipairs(plan.toDiscard) do
-    if entry.drone.id ~= plan.breedWith.id then
-      discardCount = discardCount + 1
-      if config.onDiscard then
-        config.onDiscard(entry.drone)
-      end
-    end
+    if entry.drone.id ~= plan.breedWith.id then discardCount = discardCount + 1 end
   end
-  if discardCount > 0 and not config.onDiscard and (config.trashPos or config.storagePos) then
-    if config.trashPos then
-      M.dumpToTrash(config, plan.toDiscard, plan.breedWith.id)
-    else
-      M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
+
+  -- Discard drones the plan doesn't want -- but ONLY when cargo is
+  -- genuinely under space pressure. shouldBank's "redundant, no unique
+  -- value" verdict is about GENETIC value relative to what's currently
+  -- banked, not about whether there's room to spare -- discarding the
+  -- instant something's judged redundant, even with plenty of free
+  -- cargo, throws away genetic material for no reason: keeping it costs
+  -- nothing when there's room, and minCopies math can shift as other
+  -- drones get consumed elsewhere, potentially making it useful again
+  -- later. Default behavior when actually discarding: fly to
+  -- config.trashPos (permanently voided -- see M.dumpToTrash) if known,
+  -- else config.storagePos (see M.dumpToStorage) -- trash is preferred
+  -- when both are known. Override config.onDiscard to route elsewhere
+  -- entirely (sampler/furnace/junk). No trip back to the site afterward
+  -- needed -- the apiary is already fully loaded, and wherever this
+  -- discard trip ends is a perfectly fine place to start the next
+  -- site's travel from.
+  if discardCount > 0 then
+    local freeSlots = 0
+    for _, slot in ipairs(config.workingSlots) do
+      if invCtrl().getStackInInternalSlot(slot) == nil then freeSlots = freeSlots + 1 end
+    end
+    if freeSlots < (config.minFreeSlotsBeforeDiscard or 3) then
+      if config.onDiscard then
+        for _, entry in ipairs(plan.toDiscard) do
+          if entry.drone.id ~= plan.breedWith.id then config.onDiscard(entry.drone) end
+        end
+      elseif config.trashPos or config.storagePos then
+        if config.trashPos then
+          M.dumpToTrash(config, plan.toDiscard, plan.breedWith.id)
+        else
+          M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
+        end
+      end
     end
   end
 
@@ -936,27 +950,52 @@ function M.restockHoney(config)
   local honeyPos = config.honeyStoragePos or config.storagePos
   if not honeyPos then return false end
 
-  -- Prefer refilling config.honeySlot itself if it's empty. Once its
-  -- honey is fully consumed the slot becomes empty too, but it's
-  -- deliberately excluded from config.workingSlots (M.resolveWorkingSlots
-  -- keeps it out of the breeding-candidate pool on purpose), so a search
-  -- limited to workingSlots would never even consider it. Real hardware
-  -- hit exactly this: once cargo filled up with banked drones/princesses
-  -- (leaving no free WORKING slot at all), restocking honey failed
-  -- outright even though the most natural destination -- honeySlot
-  -- itself -- was sitting right there, empty, ready to be refilled.
-  local freeSlot = nil
-  if config.honeySlot and invCtrl().getStackInInternalSlot(config.honeySlot) == nil then
-    freeSlot = config.honeySlot
-  else
-    for _, slot in ipairs(config.workingSlots) do
-      if invCtrl().getStackInInternalSlot(slot) == nil then
-        freeSlot = slot
+  -- Prefer MERGING into an existing honey stack (wherever it is --
+  -- honeySlot or any working slot) that still has room, over claiming a
+  -- brand new slot. Restocking straight into an empty slot while
+  -- honeySlot (or some working slot) still had a few honey left in it
+  -- split the stock across two separate slots instead of topping the
+  -- existing one up -- confirmed on real hardware: it fetched more with
+  -- 4 honey still sitting there, ending up with honey scattered across
+  -- two slots (wasting one cargo slot a real breeding candidate could
+  -- have used) instead of just refilling the partial stack to 64.
+  local destSlot = nil
+  local candidateSlots = { config.honeySlot }
+  for _, slot in ipairs(config.workingSlots) do table.insert(candidateSlots, slot) end
+  for _, slot in ipairs(candidateSlots) do
+    if slot then
+      local existing = invCtrl().getStackInInternalSlot(slot)
+      if looksLikeHoney(existing) and (existing.size or 1) < (existing.maxSize or 64) then
+        destSlot = slot
         break
       end
     end
   end
-  if not freeSlot then return false end
+
+  -- No partial stack to top up -- fall back to an empty slot instead,
+  -- preferring config.honeySlot itself. Once its honey is fully
+  -- consumed the slot becomes empty too, but it's deliberately excluded
+  -- from config.workingSlots (M.resolveWorkingSlots keeps it out of the
+  -- breeding-candidate pool on purpose), so a search limited to
+  -- workingSlots would never even consider it. Real hardware hit
+  -- exactly this: once cargo filled up with banked drones/princesses
+  -- (leaving no free WORKING slot at all), restocking honey failed
+  -- outright even though the most natural destination -- honeySlot
+  -- itself -- was sitting right there, empty, ready to be refilled.
+  if not destSlot then
+    if config.honeySlot and invCtrl().getStackInInternalSlot(config.honeySlot) == nil then
+      destSlot = config.honeySlot
+    else
+      for _, slot in ipairs(config.workingSlots) do
+        if invCtrl().getStackInInternalSlot(slot) == nil then
+          destSlot = slot
+          break
+        end
+      end
+    end
+  end
+  if not destSlot then return false end
+  local freeSlot = destSlot
 
   Status.setStep("Fetching honey from storage")
   local ok = Nav.gotoXZ(honeyPos.x, honeyPos.z)
@@ -1028,9 +1067,13 @@ function M.analyzeWorkingSlots(config)
       -- unanalyzed bees in one visit, more than one stack's worth of
       -- honey) -- restock immediately, high priority, rather than
       -- leaving the rest of this visit's bees unanalyzed until some
-      -- unrelated later cycle happens to trigger a restock.
+      -- unrelated later cycle happens to trigger a restock. Verifies
+      -- with a real scan first (same reasoning as M.runCycle's
+      -- proactive check) -- the tracked estimate can drift, so don't
+      -- commit to a whole trip until confirming cargo is actually low.
       if config.honeyCount and config.honeyCount <= 0 then
-        if M.restockHoney(config) then
+        config.honeyCount = countHoneyInCargo()
+        if config.honeyCount <= 0 and M.restockHoney(config) then
           config.honeyCount = countHoneyInCargo()
           honeySlot = searchForHoney() or honeySlot
         end
@@ -1120,8 +1163,18 @@ function M.runCycle(config)
     config.honeyCount = countHoneyInCargo()
   end
   if config.honeyCount <= (config.honeyRestockThreshold or 5) then
-    if M.restockHoney(config) then
-      config.honeyCount = countHoneyInCargo()
+    -- The tracked estimate says low, but it's still just an estimate --
+    -- confirmed on real hardware that it can drift from reality (it
+    -- fetched more honey while a real re-scan would have shown 4 still
+    -- sitting in cargo). Verify with an actual scan (cheap, no travel)
+    -- and true the tracker up to it BEFORE committing to a whole trip
+    -- to storage -- only actually go if the VERIFIED count is still at
+    -- or below the threshold.
+    config.honeyCount = countHoneyInCargo()
+    if config.honeyCount <= (config.honeyRestockThreshold or 5) then
+      if M.restockHoney(config) then
+        config.honeyCount = countHoneyInCargo()
+      end
     end
   end
 

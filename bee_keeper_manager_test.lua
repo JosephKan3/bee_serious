@@ -862,6 +862,35 @@ do
 end
 
 -- ============================================================
+-- Test: restockHoney MERGES into an existing partial honey stack (e.g.
+-- honeySlot still has a few left) instead of claiming a brand new empty
+-- slot -- reported as real-hardware behavior: it fetched more honey
+-- while 4 were still sitting in honeySlot, splitting the stock across
+-- two separate cargo slots instead of topping the existing one up.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = { name = "forestry:honey_drop", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+
+  -- honeySlot (20) still has a FEW honey left, not empty -- both working
+  -- slots (1, 2) are completely free.
+  world.agentInventory[20] = { name = "forestry:honey_drop", size = 4 }
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockHoney(config)
+  check("restockHoney succeeded", restocked == true)
+  check("restockHoney merged into the existing partial stack in honeySlot, growing it",
+    world.agentInventory[20] ~= nil and (world.agentInventory[20].size or 0) > 4,
+    "honeySlot size=" .. tostring(world.agentInventory[20] and world.agentInventory[20].size))
+  check("no new slot was claimed -- both free working slots are still empty",
+    world.agentInventory[1] == nil and world.agentInventory[2] == nil)
+end
+
+-- ============================================================
 -- Test: resolveWorkingSlots auto-derives from the robot's real inventory
 -- size (mocked at 15 -- see getInventorySize above) when
 -- config.workingSlots isn't explicitly set, instead of a fixed hardcoded
@@ -1113,6 +1142,51 @@ do
 
   world.dronePos = { x = 0, z = 0 }
   check("storagePos was never touched when trashPos is also known", apiary(DOWN)[1] == nil)
+end
+
+-- ============================================================
+-- Test: runQualitySite must NOT actually discard a redundant drone when
+-- cargo has plenty of free space -- shouldBank's "redundant, no unique
+-- value" verdict is about genetic value, not about whether there's room
+-- to spare. Reported as real-hardware behavior: it was trashing bees
+-- even with space available. Same setup as the trash-vs-storage test
+-- above, but with several extra free working slots.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 5, z = 9 }
+
+  local traitList = M.traitListFor("traitmax")
+  local goodExceptFertility = {}
+  for _, t in ipairs(traitList) do goodExceptFertility[t] = Cfg.targets[t].target end
+  goodExceptFertility.fertility = 1
+  local pActive, pInactive = makeAlleles(traitList, goodExceptFertility)
+  apiary(DOWN)[1] = mockBeeStack(pActive, pInactive, true)
+
+  local strongTraits = { fertility = Cfg.targets.fertility.target }
+  local strongActive, strongInactive = makeAlleles(traitList, strongTraits)
+  world.agentInventory[6] = mockBeeStack(strongActive, strongInactive, true) -- picked
+
+  local weakActive, weakInactive = makeAlleles(traitList, { lifespan = 999 })
+  world.agentInventory[7] = mockBeeStack(weakActive, weakInactive, true) -- would be discarded
+
+  local config = {
+    -- Plenty of extra free slots (8-11) beyond just the winner/weak pair.
+    workingSlots = { 6, 7, 8, 9, 10, 11 }, minCopies = 2,
+    storagePos = { x = 0, z = 0 }, storageSlotCount = 10,
+    trashPos = { x = -10, z = -10 }, trashSlotCount = 1,
+  }
+  local site = { name = "test-site", x = 5, z = 9, mode = "traitmax" }
+
+  M.runQualitySite(config, site)
+
+  check("the redundant drone was left in cargo, not flown to trash",
+    world.agentInventory[7] ~= nil and world.agentInventory[7].name == "forestry:bee")
+
+  world.dronePos = { x = -10, z = -10 }
+  check("trash was never visited when cargo had plenty of free space", apiary(DOWN)[1] == nil)
 end
 
 -- ============================================================
