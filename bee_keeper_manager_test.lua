@@ -697,9 +697,13 @@ end
 
 -- ============================================================
 -- Test: analyzeWorkingSlots finds honey dynamically wherever it actually
--- is, instead of assuming it's permanently in config.honeySlot -- if
--- honey gets restocked into a different slot, the old fixed-slot
--- behavior would silently keep failing to analyze anything.
+-- is (e.g. honeydew harvested organically into a random working slot),
+-- then CONSOLIDATES it into config.honeySlot before analyzing -- real
+-- hardware confirmed beekeeper.analyze() only ever actually consumes
+-- honey physically sitting in config.honeySlot, regardless of what slot
+-- number gets passed as its argument (it silently ignores honey sitting
+-- anywhere else). Leaving it wherever it was found (the old behavior)
+-- would pass an unusable slot number to analyze() and silently fail.
 -- ============================================================
 
 do
@@ -708,13 +712,17 @@ do
   world.lastHoneySlotUsed = nil
   world.agentInventory[1] = mockBeeStack({ fertility = 1 }, { fertility = 1 }, false) -- unanalyzed
   -- Honey is sitting in slot 15, NOT config.honeySlot (which points at an
-  -- empty slot -- simulating it having been restocked somewhere else).
+  -- empty slot -- simulating it having been restocked/harvested
+  -- somewhere else).
   world.agentInventory[15] = { name = "forestry:honey_drop", size = 64 }
 
   local config = { workingSlots = { 1 }, honeySlot = 20 }
   M.analyzeWorkingSlots(config)
-  check("analyzeWorkingSlots finds honey by searching, not just config.honeySlot",
-    world.lastHoneySlotUsed == 15, "used=" .. tostring(world.lastHoneySlotUsed))
+  check("analyzeWorkingSlots consolidates honey into config.honeySlot before using it",
+    world.lastHoneySlotUsed == 20, "used=" .. tostring(world.lastHoneySlotUsed))
+  check("the honey physically moved to honeySlot (20)",
+    world.agentInventory[20] ~= nil and world.agentInventory[20].name == "forestry:honey_drop")
+  check("slot 15 is empty now that its honey was moved", world.agentInventory[15] == nil)
 end
 
 do

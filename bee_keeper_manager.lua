@@ -942,60 +942,32 @@ local diagRestockDumped = false
 
 -- Flies to a honey source (config.honeyStoragePos, a dedicated location
 -- if you keep honey separate from general storage, falling back to
--- config.storagePos) and pulls a full stack back into a free working
--- slot. Without this, once cargo's honey genuinely runs dry there was no
--- way to recover even with a full stack sitting in a chest -- analysis
+-- config.storagePos) and pulls a full stack back into config.honeySlot
+-- specifically (see below for why). Without this, once cargo's honey
+-- genuinely runs dry there was no way to recover even with a full stack
+-- sitting in a chest -- analysis
 -- would just silently stop working forever.
 function M.restockHoney(config)
   local honeyPos = config.honeyStoragePos or config.storagePos
   if not honeyPos then return false end
 
-  -- Prefer MERGING into an existing honey stack (wherever it is --
-  -- honeySlot or any working slot) that still has room, over claiming a
-  -- brand new slot. Restocking straight into an empty slot while
-  -- honeySlot (or some working slot) still had a few honey left in it
-  -- split the stock across two separate slots instead of topping the
-  -- existing one up -- confirmed on real hardware: it fetched more with
-  -- 4 honey still sitting there, ending up with honey scattered across
-  -- two slots (wasting one cargo slot a real breeding candidate could
-  -- have used) instead of just refilling the partial stack to 64.
-  local destSlot = nil
-  local candidateSlots = { config.honeySlot }
-  for _, slot in ipairs(config.workingSlots) do table.insert(candidateSlots, slot) end
-  for _, slot in ipairs(candidateSlots) do
-    if slot then
-      local existing = invCtrl().getStackInInternalSlot(slot)
-      if looksLikeHoney(existing) and (existing.size or 1) < (existing.maxSize or 64) then
-        destSlot = slot
-        break
-      end
-    end
+  -- ALWAYS targets config.honeySlot specifically, never some other
+  -- working slot. Confirmed on real hardware: beekeeper.analyze() only
+  -- ever actually consumes honey physically sitting in config.honeySlot
+  -- -- regardless of what slot number gets passed as its argument, it
+  -- ignores honey sitting anywhere else. Landing restocked honey in a
+  -- different (merely empty, or partially-stocked) working slot would
+  -- just be inert cargo clutter analyze() can never actually use.
+  if not config.honeySlot then return false end
+  local existing = invCtrl().getStackInInternalSlot(config.honeySlot)
+  if existing and not looksLikeHoney(existing) then
+    -- Something else is occupying the honey slot -- not ours to use.
+    return false
   end
-
-  -- No partial stack to top up -- fall back to an empty slot instead,
-  -- preferring config.honeySlot itself. Once its honey is fully
-  -- consumed the slot becomes empty too, but it's deliberately excluded
-  -- from config.workingSlots (M.resolveWorkingSlots keeps it out of the
-  -- breeding-candidate pool on purpose), so a search limited to
-  -- workingSlots would never even consider it. Real hardware hit
-  -- exactly this: once cargo filled up with banked drones/princesses
-  -- (leaving no free WORKING slot at all), restocking honey failed
-  -- outright even though the most natural destination -- honeySlot
-  -- itself -- was sitting right there, empty, ready to be refilled.
-  if not destSlot then
-    if config.honeySlot and invCtrl().getStackInInternalSlot(config.honeySlot) == nil then
-      destSlot = config.honeySlot
-    else
-      for _, slot in ipairs(config.workingSlots) do
-        if invCtrl().getStackInInternalSlot(slot) == nil then
-          destSlot = slot
-          break
-        end
-      end
-    end
+  if existing and (existing.size or 1) >= (existing.maxSize or 64) then
+    return false -- already full, nothing to restock
   end
-  if not destSlot then return false end
-  local freeSlot = destSlot
+  local freeSlot = config.honeySlot
 
   Status.setStep("Fetching honey from storage")
   local ok = Nav.gotoXZ(honeyPos.x, honeyPos.z)
@@ -1059,6 +1031,22 @@ function M.analyzeWorkingSlots(config)
   -- analyze nothing at all.
   honeySlot = honeySlot or config.honeySlot
   if not honeySlot then return 0 end
+
+  -- analyze() only ever actually consumes honey physically sitting in
+  -- config.honeySlot on real hardware -- confirmed: it only worked when
+  -- honey was in slot 1, regardless of what slot number got passed as
+  -- its argument. If searchForHoney found it somewhere ELSE (e.g.
+  -- honeydew harvested organically into a random working slot, or a
+  -- leftover stack from before this fix), physically consolidate it
+  -- into config.honeySlot first -- omitting the count moves the WHOLE
+  -- stack (real robot.transferTo default), merging with whatever's
+  -- already there.
+  if config.honeySlot and honeySlot ~= config.honeySlot then
+    agent().select(honeySlot)
+    if agent().transferTo(config.honeySlot) then
+      honeySlot = config.honeySlot
+    end
+  end
 
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
