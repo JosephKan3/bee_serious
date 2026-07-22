@@ -880,6 +880,35 @@ do
 end
 
 -- ============================================================
+-- Test: a Bee Comb labeled "Honey Comb" must NOT be treated as usable
+-- honey, even though its label contains "honey" -- reported as the
+-- actual real-hardware bug: Forestry:beeCombs labeled "Honey Comb" was
+-- sitting in config.honeySlot, false-positive matched as honey, and
+-- restockHoney kept trying to suck real Honeydew on top of it (which
+-- silently fails -- two different items can't merge into one slot),
+-- leaving analyze() permanently starved of real honey.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 0, z = 0 }
+  apiary(DOWN)[1] = { name = "Forestry:honeydew", label = "Honeydew", size = 64 }
+  world.dronePos = { x = 5, z = 5 }
+  -- honeySlot (20) is occupied by a Bee Comb labeled "Honey Comb" --
+  -- NOT real honey, even though "honey" appears in its label.
+  world.agentInventory[20] = { name = "Forestry:beeCombs", label = "Honey Comb", size = 51 }
+
+  local config = { workingSlots = { 1, 2 }, honeySlot = 20, storagePos = { x = 0, z = 0 } }
+  local restocked = M.restockHoney(config)
+  check("restockHoney refuses to restock when honeySlot holds a Honey Comb, not real honey",
+    restocked == false)
+  check("the Honey Comb was left untouched in honeySlot, not overwritten/merged into",
+    world.agentInventory[20] ~= nil and world.agentInventory[20].name == "Forestry:beeCombs"
+      and world.agentInventory[20].size == 51)
+end
+
+-- ============================================================
 -- Test: restockHoney MERGES into an existing partial honey stack (e.g.
 -- honeySlot still has a few left) instead of claiming a brand new empty
 -- slot -- reported as real-hardware behavior: it fetched more honey

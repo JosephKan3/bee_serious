@@ -925,6 +925,18 @@ local function looksLikeHoney(stack)
   if not stack then return false end
   local name = stack.name and stack.name:lower() or ""
   local label = stack.label and stack.label:lower() or ""
+  -- Bee Combs are a totally different, real Forestry item (a crafting/
+  -- processing byproduct, e.g. Forestry:beeCombs, harvested from an
+  -- apiary the same as anything else) -- never usable for
+  -- beekeeper.analyze(). But several comb variants are literally
+  -- LABELED "Honey Comb", which would otherwise false-positive match on
+  -- "honey" alone. Confirmed as the real bug: Honey Comb sitting in
+  -- config.honeySlot was treated as valid honey, so restockHoney never
+  -- detected the slot as "occupied by something else" and kept trying
+  -- to suck real Honeydew on top of it -- which silently fails (two
+  -- genuinely different items can't merge into the same slot), leaving
+  -- analyze() starved of real honey the entire time.
+  if name:find("comb") or label:find("comb") then return false end
   return name:find("honey") or name:find("honeydew") or label:find("honey") or label:find("honeydew")
 end
 
