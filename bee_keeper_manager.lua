@@ -531,17 +531,31 @@ local function bestOfSpecies(candidates, traitList)
   return best
 end
 
--- The set of species names the agent currently holds as analyzed bees in
--- its working slots -- the "owned" boundary the tree planner stops at
--- (already-bred intermediates don't need re-breeding). Any specimen of a
--- species (princess OR drone) counts as owning it, since a mutation graph
--- only cares whether the species is on hand at all.
+-- The set of species names the agent can SUSTAINABLY supply -- the "owned"
+-- boundary the tree planner stops at (already-obtained intermediates don't
+-- need re-breeding). Ownership is by PRINCESS/queen, not just any specimen:
+-- a princess, when bred, regenerates both a replacement princess AND drones
+-- of her species indefinitely, so holding one means you can supply that
+-- species in either role forever. Drone-ONLY stock can't: a drone's
+-- offspring take the OTHER parent's species, so drones get consumed without
+-- ever yielding a princess of their own species. Counting a drone-only
+-- species as "owned" strands the planner -- it stops breeding that
+-- intermediate, so the princess a downstream step needs (allele1) never
+-- materializes (a real, reproducible deadlock: Common-as-drone-only blocks
+-- Cultivated = Common(princess) x Forest forever). Requiring a princess
+-- keeps the robot breeding an intermediate until it has a usable one.
+-- (Base leaves the user must gather aren't tracked here at all -- the graph
+-- treats them as acquirable; the executor's per-recipe check gates whether
+-- the specific princess/drone roles are actually in cargo.)
 function M.ownedSpecies(config)
   local owned = {}
   for _, slot in ipairs(config.workingSlots) do
-    local individual = M.readOwnSlot(slot)
-    if individual and individual.active and individual.active.species then
-      owned[Cfg.speciesKey(individual.active.species)] = true
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    if isPrincessOrQueenStack(stack) then
+      local individual = readIndividual(stack)
+      if individual and individual.active and individual.active.species then
+        owned[Cfg.speciesKey(individual.active.species)] = true
+      end
     end
   end
   return owned
@@ -580,22 +594,53 @@ function M.planMutationStep(config, targetSpecies, traitList)
   end
   if #plan.steps == 0 then return nil, "no_actionable_step" end
 
-  -- DIRECTIONAL: the step names which species must be the princess
-  -- (allele1) and which the drone (allele2). Require a genuine
-  -- princess/queen item of the former and a genuine drone item of the
-  -- latter -- do NOT fall back to the reverse arrangement (direction may
-  -- matter for triggering the mutation; the data's order is the safe one).
+  -- The plan names ONE recipe per intermediate, but many species have
+  -- several recipes (Common = Forest x {Wintry, Meadows, Tropical, ...}).
+  -- The planner picks the graph-cheapest, which can name a parent the user
+  -- doesn't currently hold even though a DIFFERENT recipe for the same
+  -- result IS satisfiable from what's in cargo right now. So don't lock
+  -- onto the planner's single choice: search ALL recipes producing this
+  -- sub-target and use whichever is actually satisfiable (directionally)
+  -- with the drones/princesses on hand -- "find another available drone if
+  -- one exists". Rank satisfiable recipes by least special-condition
+  -- burden, then highest chance (the planner's own priority order).
   local step = plan.steps[1]
   local held = groupBySpecies(config)
-  local pGroup = held[step.princess]
-  local dGroup = held[step.drone]
-  local princessOk = pGroup and #pGroup.princesses > 0
-  local droneOk = dGroup and #dGroup.drones > 0
 
-  if not princessOk or not droneOk then
+  local function satisfiable(r)
+    local pg, dg = held[r.princess], held[r.drone]
+    return pg and #pg.princesses > 0 and dg and #dg.drones > 0
+  end
+
+  -- DIRECTIONAL throughout: princess must be a genuine princess/queen item
+  -- of allele1, drone a genuine drone item of allele2 -- never the reverse.
+  local candidates = graph.byResult[step.result] or {
+    { princess = step.princess, drone = step.drone, chance = step.chance,
+      conditions = step.conditions, condCost = 0 },
+  }
+  local best = nil
+  for _, r in ipairs(candidates) do
+    if satisfiable(r) then
+      if not best
+        or (r.condCost or 0) < (best.condCost or 0)
+        or ((r.condCost or 0) == (best.condCost or 0) and (r.chance or 0) > (best.chance or 0)) then
+        best = r
+      end
+    end
+  end
+
+  if not best then
+    -- No recipe for this sub-target is satisfiable from cargo yet -- report
+    -- what the planner's chosen (cheapest) recipe needs, plus any base leaf
+    -- bees the user must go gather for the whole tree.
     local needs = {}
-    if not princessOk then table.insert(needs, string.format("a princess/queen of '%s'", step.princess)) end
-    if not droneOk then table.insert(needs, string.format("a drone of '%s'", step.drone)) end
+    local pGroup, dGroup = held[step.princess], held[step.drone]
+    if not (pGroup and #pGroup.princesses > 0) then
+      table.insert(needs, string.format("a princess/queen of '%s'", step.princess))
+    end
+    if not (dGroup and #dGroup.drones > 0) then
+      table.insert(needs, string.format("a drone of '%s'", step.drone))
+    end
     local report = string.format("to breed '%s' need %s", step.result, table.concat(needs, " and "))
     if plan.missingLeaves and #plan.missingLeaves > 0 then
       report = report .. "; missing base leaf bees to gather: " .. table.concat(plan.missingLeaves, ", ")
@@ -603,15 +648,15 @@ function M.planMutationStep(config, targetSpecies, traitList)
     return nil, report
   end
 
-  local princessPick = bestOfSpecies(pGroup.princesses, traitList)
-  local dronePick = bestOfSpecies(dGroup.drones, traitList)
+  local princessPick = bestOfSpecies(held[best.princess].princesses, traitList)
+  local dronePick = bestOfSpecies(held[best.drone].drones, traitList)
   return {
     princessSlot = princessPick.slot,
     droneSlot = dronePick.slot,
-    princessSpecies = step.princess,
-    droneSpecies = step.drone,
-    chance = step.chance,
-    conditions = step.conditions or {},
+    princessSpecies = best.princess,
+    droneSpecies = best.drone,
+    chance = best.chance,
+    conditions = best.conditions or {},
     subTarget = step.result,
     missingLeaves = plan.missingLeaves,
   }, nil
@@ -1444,7 +1489,13 @@ function M.runCycle(config)
   local needsRestock = false
   for _, entry in ipairs(log) do
     if entry:find("no_candidate_drones_in_working_slots", 1, true)
-      or entry:find("no_princess_at_site_or_in_cargo", 1, true) then
+      or entry:find("no_princess_at_site_or_in_cargo", 1, true)
+      -- Mutation sites starve the same way: a parent species (princess or
+      -- drone) the next tree step needs may be sitting in storage, not
+      -- cargo. Without this, a mutation run can deadlock waiting on a
+      -- parent it already owns -- e.g. 7 Forest princesses in storage while
+      -- cargo has none, so the Forest x Wintry step never fires.
+      or entry:find("waiting_on_parent_species", 1, true) then
       needsRestock = true
     end
   end

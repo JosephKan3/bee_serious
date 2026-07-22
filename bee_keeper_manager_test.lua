@@ -698,6 +698,49 @@ do
 end
 
 -- ============================================================
+-- Test: ALTERNATIVE-RECIPE fallback -- when the graph's cheapest recipe
+-- for a result names a drone the robot doesn't hold, but a DIFFERENT
+-- recipe for the SAME result is satisfiable from cargo, use that instead
+-- of waiting. Here Common = Forest x Wintry (higher chance, planner's
+-- pick) OR Forest x Meadows; cargo has Wintry only as a PRINCESS (wrong
+-- role) but a real Meadows DRONE -- so it should breed Forest x Meadows.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+
+  local traitList = M.traitListFor("mutation")
+  local forestA, forestI = makeAlleles(traitList, { species = { name = "Forest" } })
+  local wintryA, wintryI = makeAlleles(traitList, { species = { name = "Wintry" } })
+  local meadowsA, meadowsI = makeAlleles(traitList, { species = { name = "Meadows" } })
+
+  -- Forest princess, a Wintry PRINCESS (not a drone), and a Meadows DRONE.
+  world.agentInventory[3] = mockPrincessStack(forestA, forestI, true)
+  world.agentInventory[4] = mockPrincessStack(wintryA, wintryI, true)
+  world.agentInventory[5] = mockDroneStack(meadowsA, meadowsI, true)
+
+  local config = {
+    workingSlots = { 3, 4, 5 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Wintry", result = "Common", chance = 15 },
+      { allele1 = "Forest", allele2 = "Meadows", result = "Common", chance = 10 },
+    }),
+  }
+  local site = { name = "alt-recipe-site", x = 20, z = 3, mode = "mutation", targetSpecies = "Common" }
+
+  local status = M.runMutationSite(config, site)
+  check("alternative-recipe: attempts rather than waiting for the unavailable Wintry drone",
+    status:match("^attempting mutation") ~= nil, status)
+  local queenSpecies = Cfg.speciesKey(apiary(DOWN)[1].individual.active.species)
+  local droneSpecies = Cfg.speciesKey(apiary(DOWN)[2].individual.active.species)
+  check("alternative-recipe: bred Forest(princess) x Meadows(drone), the satisfiable pair",
+    queenSpecies == "Forest" and droneSpecies == "Meadows",
+    "queen=" .. tostring(queenSpecies) .. " drone=" .. tostring(droneSpecies))
+end
+
+-- ============================================================
 -- Test: SPECIAL-CONDITION gate -- a step whose recipe carries conditions
 -- the robot can't provide defers (does not breed) when the confirmer says
 -- no, and proceeds once it says yes.

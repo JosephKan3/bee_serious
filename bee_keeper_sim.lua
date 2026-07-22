@@ -512,18 +512,22 @@ function M.newWorld(config, sites, opts)
   -- storage directly, so M.restockFromStorage's fallback path is
   -- exercised from cycle 1, not only after the first discard.
   local nextWorkingSlotIndex = 1
-  local function put(rawGenotype, kind)
+  local function put(rawGenotype, kind, size)
     while config.workingSlots[nextWorkingSlotIndex] == config.honeySlot do
       nextWorkingSlotIndex = nextWorkingSlotIndex + 1
     end
     local slot = config.workingSlots[nextWorkingSlotIndex]
     nextWorkingSlotIndex = nextWorkingSlotIndex + 1
-    world.drone.inventory[slot] = toStack(rawGenotype, kind or "drone")
+    local stack = toStack(rawGenotype, kind or "drone")
+    if size then stack.size = size end
+    world.drone.inventory[slot] = stack
   end
 
   local nextStorageSlot = 1
-  local function putStorage(rawGenotype, kind)
-    world.storage[nextStorageSlot] = toStack(rawGenotype, kind or "drone")
+  local function putStorage(rawGenotype, kind, size)
+    local stack = toStack(rawGenotype, kind or "drone")
+    if size then stack.size = size end
+    world.storage[nextStorageSlot] = stack
     nextStorageSlot = nextStorageSlot + 1
   end
 
@@ -607,11 +611,29 @@ function M.newWorld(config, sites, opts)
       -- back to the classic Forest(princess) x Meadows(drone) demo pair.
       local leaves = opts.mutationLeaves
       if leaves and #leaves > 0 then
+        -- A princess plus an AMPLE stack of drones per leaf: a mutation is
+        -- probabilistic per mating (~8-15%) and a princess-x-drone cross of
+        -- two homozygous leaves yields offspring that all take the
+        -- princess's active species, so the leaf DRONE species never
+        -- regenerates -- without a real stock the run would exhaust its few
+        -- drones before the mutation ever rolls. A 32-deep stack (each
+        -- mating peels one off) gives plenty of attempts, plus a storage
+        -- backup to restock from.
+        local LEAF_DRONE_STACK = 32
+        -- Princesses are the sustainable resource but they DO get consumed
+        -- each mating, and when a mutation fires on the princess draw the
+        -- replacement takes the mutated species instead of the leaf's -- so
+        -- a leaf princess line can dwindle under several contending apiaries.
+        -- Stock a reserve in storage (restockFromStorage pulls them back)
+        -- so a multi-step demo doesn't stall waiting on a base princess.
+        local LEAF_PRINCESS_RESERVE = 6
         for _, leaf in ipairs(leaves) do
           put(makeStartingRaw(traitList, leaf), "princess")
-          put(makeStartingRaw(traitList, leaf), "drone")
-          putStorage(makeStartingRaw(traitList, leaf), "princess")
-          putStorage(makeStartingRaw(traitList, leaf), "drone")
+          put(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
+          for _ = 1, LEAF_PRINCESS_RESERVE do
+            putStorage(makeStartingRaw(traitList, leaf), "princess")
+          end
+          putStorage(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
         end
       else
         put(makeStartingRaw(traitList, "Forest"), "princess")
