@@ -939,39 +939,123 @@ function M.countConvertible(config)
   return c
 end
 
--- Assembles the pure scheduler state from a live cargo scan + the mutation graph.
--- Returns (state, plan). Base species = configured breeders + graph leaves.
-function M.buildSchedulerState(config, site)
-  local graph = config.mutationGraph
-  local opts = config.genebank
-  local summary = M.genebankScan(config)
+-- ============================================================
+-- Storage-backed genebank: BANKS LIVE IN THE STORAGE CHEST; cargo is a transient
+-- working buffer. Each visit deposits cargo bees into storage, scans the full
+-- stock there, lets the scheduler pick a job, fetches just that job's two parents
+-- back into cargo, and breeds them at the apiary. So cargo can never overflow and
+-- the scheduler always sees the complete stock -- what makes deep trees (and
+-- rainbow scale) actually work, instead of being blind to bees sitting in storage.
+-- ============================================================
 
-  -- Base species = graph LEAVES we actually hold stock of (seeded pristine
-  -- breeders). Using only what's on hand -- not every configured breeder --
-  -- keeps the plan from routing through a base species we don't have (which
-  -- would just block). A leaf we lack that the target needs surfaces as a
-  -- "blocked: need pristine X" so the user knows to supply it.
-  local base = {}
-  for sp in pairs(summary) do
-    if (graph.leaves or {})[sp] then base[sp] = true end
+-- Classify a stack: { species, role="princess"|"drone", pure, alleles } or nil.
+local function classifyBee(stack)
+  local ind = readIndividual(stack)
+  if not (ind and ind.active and ind.active.species and ind.inactive and ind.inactive.species) then
+    return nil
+  end
+  local role = isPrincessOrQueenStack(stack) and "princess"
+    or (isDroneStack(stack) and "drone" or nil)
+  if not role then return nil end
+  local a = Cfg.speciesKey(ind.active.species)
+  local i = Cfg.speciesKey(ind.inactive.species)
+  return { species = a, role = role, pure = (a == i), alleles = { [a] = true, [i] = true }, size = stack.size or 1 }
+end
+
+-- Travels to storage, deposits every bee currently in cargo into it (merging
+-- matching drone stacks), then scans storage. Leaves the robot AT storage so a
+-- fetch can immediately follow. Returns:
+--   summary     = { [species] = { purePrincesses, pureDrones } }
+--   convertible = { [species] = <# pristine hybrid princesses carrying that allele> }
+--   slotsByKey  = fetch index: "P:<sp>" pure princess, "D:<sp>" pure drone,
+--                 "V:<sp>" hybrid vessel carrying <sp> -> { storageSlot, ... }
+function M.syncBanksToStorage(config)
+  local down = sides().down
+  if not config.storagePos then return {}, {}, {} end
+  if not Nav.gotoXZ(config.storagePos.x, config.storagePos.z) then return {}, {}, {} end
+  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+
+  -- 1. Deposit every cargo bee into storage. All bee items share one name, so a
+  -- same-name slot might still be a genetically different bee -- dropIntoSlot only
+  -- merges a real genotype match (returns true) and otherwise leaves the stack
+  -- untouched, so we TRY each same-name not-full slot and fall back to the first
+  -- empty. Without this, a Wintry drone "merged" into a Forest-drone slot silently
+  -- failed and stayed stranded in cargo (invisible to the scheduler in storage).
+  for _, cslot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(cslot)
+    if classifyBee(stack) then
+      agent().select(cslot)
+      local firstEmpty, done = nil, false
+      for s = 1, size do
+        local existing = invCtrl().getStackInSlot(down, s)
+        if existing == nil then
+          firstEmpty = firstEmpty or s
+        elseif existing.name == stack.name and (existing.size or 1) < (existing.maxSize or 64) then
+          if invCtrl().dropIntoSlot(down, s) then done = true; break end
+        end
+      end
+      if not done and firstEmpty then invCtrl().dropIntoSlot(down, firstEmpty) end
+    end
   end
 
-  local plan = MG.planBreedingTree(graph, base, site.targetSpecies)
-  local banks = {}
-  for sp, s in pairs(summary) do
-    banks[sp] = { purePrincesses = s.purePrincesses, pureDrones = s.pureDrones }
+  -- 2. Scan storage.
+  local summary, convertible, slotsByKey = {}, {}, {}
+  local function rec(sp)
+    summary[sp] = summary[sp] or { purePrincesses = 0, pureDrones = 0 }
+    return summary[sp]
   end
-  local state = {
-    banks = banks,
-    convertible = M.countConvertible(config),
-    steps = plan.steps,
-    baseSpecies = base,
-    target = site.targetSpecies,
-    minPrincesses = GB.minPrincesses(opts),
-    minDrones = GB.minDrones(opts),
-    recoveryDrones = GB.recoveryDrones(opts),
-  }
-  return state, plan
+  local function addSlot(key, slot)
+    slotsByKey[key] = slotsByKey[key] or {}
+    table.insert(slotsByKey[key], slot)
+  end
+  for s = 1, size do
+    local c = classifyBee(invCtrl().getStackInSlot(down, s))
+    if c then
+      if c.role == "princess" and c.pure then
+        rec(c.species).purePrincesses = rec(c.species).purePrincesses + c.size
+        addSlot("P:" .. c.species, s)
+      elseif c.role == "princess" then -- hybrid: conversion fodder toward either allele
+        for allele in pairs(c.alleles) do
+          convertible[allele] = (convertible[allele] or 0) + c.size
+          addSlot("V:" .. allele, s)
+        end
+      elseif c.role == "drone" and c.pure then
+        rec(c.species).pureDrones = rec(c.species).pureDrones + c.size
+        addSlot("D:" .. c.species, s)
+      end
+    end
+  end
+  return summary, convertible, slotsByKey
+end
+
+-- Pull one bee from storage slot `sslot` into a free cargo slot (already at
+-- storage). Returns true on success.
+local function fetchOne(config, sslot)
+  local down = sides().down
+  local free
+  for _, cslot in ipairs(config.workingSlots) do
+    if cslot ~= config.honeySlot and invCtrl().getStackInInternalSlot(cslot) == nil then free = cslot; break end
+  end
+  if not free then return false end
+  agent().select(free)
+  local moved = invCtrl().suckFromSlot(down, sslot, 1)
+  return moved and moved > 0
+end
+
+-- Fetch a job's two parents from storage into cargo (already at storage).
+-- Returns (true) or (false, reason).
+local function fetchJobParents(config, job, slotsByKey)
+  local function first(key) local l = slotsByKey[key]; return l and l[1] end
+  local ka, kb
+  if job.type == "mutate" then ka, kb = "P:" .. job.princess, "D:" .. job.drone
+  elseif job.type == "grow" then ka, kb = "P:" .. job.species, "D:" .. job.species
+  elseif job.type == "convert" then ka, kb = "V:" .. job.to, "D:" .. job.to end
+  local a, b = first(ka), first(kb)
+  if not a then return false, "no " .. ka end
+  if not b then return false, "no " .. kb end
+  if not fetchOne(config, a) then return false, "pull " .. ka end
+  if not fetchOne(config, b) then return false, "pull " .. kb end
+  return true
 end
 
 -- Special conditions attached to the recipe that produces `result` in the plan.
@@ -982,46 +1066,77 @@ local function conditionsForResult(plan, result)
   return nil
 end
 
--- Executes a scheduler "mutate" job: gate on special conditions, then load a
--- PUREBRED princess of job.princess + PUREBRED drone of job.drone.
-local function executeMutateJob(config, site, job, plan)
+-- Loads the two just-fetched parents from cargo into the apiary and breeds them.
+-- After syncBanksToStorage cleared cargo, it holds exactly one princess + one
+-- drone (plus honey), so they're found by role.
+local function executeJobAtApiary(config, site, job)
   local down = sides().down
-  local _, index = M.genebankScan(config)
-  local pSlot = index[job.princess] and index[job.princess].purePrincess[1]
-  local dSlot = index[job.drone] and index[job.drone].pureDrone[1]
-  if not pSlot or not dSlot then return "mutate_missing_pure_parents" end
-
-  local conditions = conditionsForResult(plan, job.result)
-  if conditions and #conditions > 0 then
-    if not M.gateSpecialConditions(config, conditions, job.result) then
-      return "awaiting_special_condition:" .. table.concat(conditions, "; ")
-    end
+  local pSlot, dSlot
+  for _, cslot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(cslot)
+    if isPrincessOrQueenStack(stack) then pSlot = pSlot or cslot
+    elseif isDroneStack(stack) then dSlot = dSlot or cslot end
   end
+  if not pSlot or not dSlot then return "job_parents_missing_in_cargo" end
 
-  local toward = (job.result ~= site.targetSpecies) and (" toward " .. job.result) or ""
-  Status.setStep(string.format("Mutating %s x %s%s at %s",
-    job.princess, job.drone, toward, site.name or "?"))
   agent().select(pSlot)
   if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
   dSlot = ensureSingleItemSlot(config, dSlot)
   if not dSlot then return "cargo_full_cannot_split_drone_stack" end
   agent().select(dSlot)
   if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
-  return string.format("mutating %s x %s%s", job.princess, job.drone, toward)
+
+  if job.type == "grow" then return "growing " .. job.species .. " bank" end
+  if job.type == "convert" then return "converting toward " .. job.to end
+  local toward = (job.result ~= site.targetSpecies) and (" toward " .. job.result) or ""
+  return "mutating " .. job.princess .. " x " .. job.drone .. toward
 end
 
--- One genebank-scheduled decision+action for a mutation site (the apiary is
--- already positioned; hybrids already junked). Turns the scheduler's next job
--- into a real action.
+-- Assembles the scheduler state from the storage scan + the mutation graph.
+-- Base species = graph LEAVES we actually hold (so the plan never routes through
+-- a breeder we lack; a missing one surfaces as "blocked: need pristine X").
+function M.buildSchedulerState(config, site, summary, convertible)
+  local graph = config.mutationGraph
+  local opts = config.genebank
+  local base = {}
+  for sp in pairs(summary) do
+    if (graph.leaves or {})[sp] then base[sp] = true end
+  end
+  local plan = MG.planBreedingTree(graph, base, site.targetSpecies)
+  local banks = {}
+  for sp, s in pairs(summary) do
+    banks[sp] = { purePrincesses = s.purePrincesses, pureDrones = s.pureDrones }
+  end
+  local state = {
+    banks = banks, convertible = convertible, steps = plan.steps,
+    baseSpecies = base, target = site.targetSpecies,
+    minPrincesses = GB.minPrincesses(opts), minDrones = GB.minDrones(opts),
+    recoveryDrones = GB.recoveryDrones(opts),
+  }
+  return state, plan
+end
+
+-- One genebank-scheduled decision+action for a mutation site: sync banks to
+-- storage, ask the scheduler for the next job, fetch its parents, and breed them.
 function M.runGenebankSchedule(config, site)
-  local state, plan = M.buildSchedulerState(config, site)
+  local summary, convertible, slotsByKey = M.syncBanksToStorage(config)
+  local state, plan = M.buildSchedulerState(config, site, summary, convertible)
   local job = Sched.nextJob(state)
   if job.type == "done" then return "mutation_succeeded:switch_site_to_species_mode" end
   if job.type == "blocked" then return "blocked:" .. tostring(job.need) end
-  if job.type == "convert" then return M.convertToward(config, site, job.to) end
-  if job.type == "grow" then return M.maintainBankAt(config, site, job.species) end
-  if job.type == "mutate" then return executeMutateJob(config, site, job, plan) end
-  return "unknown_job:" .. tostring(job.type)
+
+  -- Special-condition gate BEFORE fetching (don't move bees for a step we can't run).
+  if job.type == "mutate" then
+    local conditions = conditionsForResult(plan, job.result)
+    if conditions and #conditions > 0 and not M.gateSpecialConditions(config, conditions, job.result) then
+      return "awaiting_special_condition:" .. table.concat(conditions, "; ")
+    end
+  end
+
+  local fetched, why = fetchJobParents(config, job, slotsByKey)
+  if not fetched then return "fetch_failed:" .. job.type .. "(" .. tostring(why) .. ")" end
+  if not gotoSite(site) then return "nav_failed_to_apiary" end
+  return executeJobAtApiary(config, site, job)
 end
 
 -- Runs one decision+action cycle for a "mutation" site. Executes an
