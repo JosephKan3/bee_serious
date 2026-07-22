@@ -560,23 +560,26 @@ function M.ownedSpecies(config)
     end
   end
 
-  -- In genebank mode, tighten the boundary for PRODUCIBLE species: an
-  -- intermediate only counts as a usable boundary once its bank can actually
-  -- hand over a princess (canSpendPrincess -- pure princess + recovery drones).
-  -- If the bank is too thin, we WANT the planner to keep mutating more of that
-  -- intermediate (a mutation yields pure specimens), rather than declaring it
-  -- "owned" and then deadlocking downstream because there aren't enough drones
-  -- to spend its princess. LEAVES are left as-is: they can't be mutated into,
-  -- so they must count as owned when held (the genebank gate maintains them by
-  -- same-species purification instead).
+  -- In genebank mode, ownership is by PUREBRED princess, and a PRODUCIBLE
+  -- (intermediate) species only counts once it has a SURPLUS purebred princess
+  -- beyond its reserve -- i.e. one it can actually spend into the next mutation.
+  -- Below that, we want the planner to keep mutating MORE of the intermediate
+  -- (a mutation yields purebred specimens) rather than call it "owned" and then
+  -- stall downstream. Base species (not producible) can't be mutated into, so a
+  -- single purebred princess is enough to count them owned (their pristine
+  -- supply / pure x pure maintenance keeps them going).
   if config.genebank and config.mutationGraph then
     local summary = M.genebankScan(config)
     local producible = config.mutationGraph.producible or {}
-    for species in pairs(owned) do
-      if producible[species] and not GB.canSpendPrincess(summary, species, config.genebank) then
-        owned[species] = nil
+    local minP = GB.minPrincesses(config.genebank)
+    local rebuilt = {}
+    for species, s in pairs(summary) do
+      if s.purePrincesses >= 1 then
+        local reserve = producible[species] and minP or 0
+        if s.purePrincesses > reserve then rebuilt[species] = true end
       end
     end
+    owned = rebuilt
   end
   return owned
 end
@@ -762,55 +765,60 @@ function M.genebankScan(config)
   return GB.summarize(entries), index
 end
 
--- A cargo slot holding a princess of `species` (preferImpure picks a drifted
--- one to purify; otherwise a pure one). nil if none.
-local function findSpeciesPrincessSlot(config, species, preferImpure)
+-- A cargo slot holding a PUREBRED princess / drone of `species` (nil if none).
+local function findPurePrincessSlot(config, species)
   local _, index = M.genebankScan(config)
-  local g = index[species]
-  if not g then return nil end
-  if preferImpure then return g.impurePrincess[1] or g.purePrincess[1] end
-  return g.purePrincess[1] or g.impurePrincess[1]
+  return index[species] and index[species].purePrincess[1] or nil
+end
+local function findPureDroneSlot(config, species)
+  local _, index = M.genebankScan(config)
+  return index[species] and index[species].pureDrone[1] or nil
 end
 
--- A cargo slot holding a drone of `species`, preferring a pure one (the clean
--- allele to purify toward). nil if none.
-local function findSpeciesDroneSlot(config, species)
-  local _, index = M.genebankScan(config)
-  local g = index[species]
-  if not g then return nil end
-  return g.pureDrone[1] or g.impureDrone[1]
-end
-
--- Runs one same-species maintenance/purification cross for `species` at this
--- site's apiary, to rebuild its reserve before it's drawn on again. Uses a
--- drifted (impure) princess of the species as the vessel when there is one --
--- bred against a PURE drone it converges back to homozygous -- else seeds a
--- pure one. Returns a status string. (Bootstrapping a species from ONLY drones,
--- via a spare/breeder princess, is a later addition -- see the v0.3 design memo;
--- for now that case reports it can't replenish here.)
-function M.purifyToward(config, site, species)
+-- Maintains a species' bank by breeding it PURE x PURE (a purebred princess x a
+-- purebred drone of the same species). Purebred x purebred of one species always
+-- yields purebred offspring, so the line never drifts -- this is the ONLY way a
+-- bank is grown/sustained. (We never breed a hybrid back toward a species; that's
+-- the drift bug -- hybrids are junked instead, see M.junkHybrids.) Returns a
+-- status string.
+function M.maintainBankAt(config, site, species)
   local down = sides().down
-
-  local princessInd = M.readSideSlot(down, 1)
-  local haveVessel = princessInd and princessInd.active
-    and Cfg.speciesKey(princessInd.active.species) == species
-  if not haveVessel then
-    local slot = findSpeciesPrincessSlot(config, species, true)
-    if not slot then return "cannot_replenish_no_princess:" .. species end
-    Status.setStep("Replenishing " .. species .. " at " .. (site.name or "?"))
-    agent().select(slot)
-    if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-    princessInd = M.readSideSlot(down, 1)
-    if not princessInd then return "swap_queen_failed_readback" end
-  end
-
-  local droneSlot = findSpeciesDroneSlot(config, species)
-  if not droneSlot then return "cannot_replenish_no_drone:" .. species end
-  droneSlot = ensureSingleItemSlot(config, droneSlot)
-  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
-  agent().select(droneSlot)
+  local pSlot = findPurePrincessSlot(config, species)
+  if not pSlot then return "need_pristine_princess:" .. species end
+  Status.setStep("Maintaining " .. species .. " bank at " .. (site.name or "?"))
+  agent().select(pSlot)
+  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+  local dSlot = findPureDroneSlot(config, species)
+  if not dSlot then return "need_pure_drone:" .. species end
+  dSlot = ensureSingleItemSlot(config, dSlot)
+  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(dSlot)
   if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
-  return "replenishing " .. species
+  return "maintaining " .. species
+end
+
+-- Junk every HYBRID (non-purebred) bee in cargo -- send it to trash (or storage
+-- if no trash). In the purebred-bank strategy a hybrid is never useful: breeding
+-- one drifts the species, so per the wiki they go straight to the junk chest.
+-- keepSpecies (optional) is spared -- e.g. the site's target, so a first hybrid
+-- specimen of it survives for the species-mode handoff.
+function M.junkHybrids(config, site, keepSpecies)
+  local entries = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind and ind.active and ind.active.species
+      and (isPrincessOrQueenStack(stack) or isDroneStack(stack)) then
+      local species = Cfg.speciesKey(ind.active.species)
+      if species ~= keepSpecies and not M.isSpeciesPurebred(ind, species) then
+        table.insert(entries, { drone = { id = "hybrid:" .. slot, _slot = slot } })
+      end
+    end
+  end
+  if #entries == 0 then return 0 end
+  if config.trashPos then return M.dumpToTrash(config, entries, nil) end
+  if config.storagePos then return M.dumpToStorage(config, entries, nil) end
+  return 0
 end
 
 -- Runs one decision+action cycle for a "mutation" site. Executes an
@@ -865,31 +873,60 @@ function M.runMutationSite(config, site)
     end
   end
 
+  -- Genebank mode: junk any hybrids sitting in cargo before deciding -- they're
+  -- never used as parents (breeding them drifts a species), so they just clutter
+  -- the reserve math. Spare the target species so a first hybrid specimen of it
+  -- survives for the species-mode handoff.
+  if config.genebank then
+    M.junkHybrids(config, site, site.targetSpecies)
+    -- back at the site after the trash trip
+    if not gotoSite(site) then return "nav_failed_after_junk" end
+  end
+
   local step, report = M.planMutationStep(config, site.targetSpecies, mutationTraits)
   if not step then
     return "waiting_on_parent_species:" .. (report or "no_known_recipe")
   end
 
-  -- Genebank reserve gate (opt-in). Never draw a parent species below its
-  -- reserve (>=1 purebred princess + >=N drones): if a parent is short, run a
-  -- same-species purification/maintenance cross FIRST (rebuilding it), instead
-  -- of consuming it into a mutation and letting the line drift/vanish. When
-  -- ready, load PUREBRED parents so the mutation offspring stay clean. This is
-  -- what actually stops multi-step species drift.
+  -- Genebank reserve gate (opt-in). A parent is only spent from PUREBRED stock,
+  -- and never below its reserve. Base (non-producible) species have an external
+  -- pristine supply, so any purebred specimen is spendable and a short bank is
+  -- rebuilt PURE x PURE (M.maintainBankAt); PRODUCIBLE intermediates keep
+  -- >=minPrincesses princesses / >=minDrones drones in reserve, and when short
+  -- the tree planner just breeds MORE of them (ownedSpecies de-owns a thin
+  -- intermediate). Loading purebred parents is what keeps offspring clean.
   if config.genebank then
+    local opts = config.genebank
+    local producible = (config.mutationGraph and config.mutationGraph.producible) or {}
     local summary, index = M.genebankScan(config)
-    local verdict = GB.planStepDraw(summary, step.princessSpecies, step.droneSpecies, config.genebank)
-    if not verdict.ready then
-      if #verdict.replenish > 0 then
-        return M.purifyToward(config, site, verdict.replenish[1])
+    local A, B = step.princessSpecies, step.droneSpecies
+    local aReserve = producible[A] and GB.minPrincesses(opts) or 0
+    local bReserve = producible[B] and GB.minDrones(opts) or 0
+    local aPure = (summary[A] and summary[A].purePrincesses) or 0
+    local bPureDrones = (summary[B] and summary[B].pureDrones) or 0
+
+    -- The DRONE parent short of its reserve: grow that bank PURE x PURE -- a
+    -- mating yields several drones (fertility), so drone stock genuinely grows.
+    if not (bPureDrones > bReserve) then
+      if index[B] and #index[B].purePrincess >= 1 and #index[B].pureDrone >= 1 then
+        return M.maintainBankAt(config, site, B)
       end
-      return "waiting_need_base_or_spare:" .. table.concat(verdict.unrecoverable, ", ")
+      return "need_pristine:" .. B
     end
-    -- Ready: override the planner's slot picks with PUREBRED specimens.
-    local pg = index[step.princessSpecies]
-    local dg = index[step.droneSpecies]
-    if pg and pg.purePrincess[1] then step.princessSlot = pg.purePrincess[1] end
-    if dg and dg.pureDrone[1] then step.droneSlot = dg.pureDrone[1] end
+
+    -- The PRINCESS parent short of surplus: maintenance CAN'T grow princess count
+    -- (a queen yields only ~1 princess), so we don't maintain -- an intermediate
+    -- is instead re-mutated (ownedSpecies de-owns a thin producible species, so
+    -- the planner already routes back to breeding more of it); a base species
+    -- has run out of its pristine supply and needs more.
+    if not (aPure > aReserve) then
+      if not producible[A] then return "need_pristine:" .. A end
+      return "building_intermediate:" .. A
+    end
+
+    -- Ready: load PUREBRED parents.
+    step.princessSlot = index[A].purePrincess[1]
+    step.droneSlot = index[B].pureDrone[1]
   end
 
   -- Special-condition gate: some steps need a foundation block / biome /

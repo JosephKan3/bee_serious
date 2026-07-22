@@ -139,7 +139,17 @@ config.trashPos = config.trashPos or { x = -8, z = -8 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
 config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 
-Sim.install(config, config.sites, { hard = hardMode, mutationGraph = mutationGraph, mutationLeaves = mutationLeaves })
+-- Genebank runs model mutation-boosting frames (see sim mutationBoost) so a
+-- purebred x purebred cross reliably mutates instead of burning many base
+-- princesses at the raw ~15% rate -- what real breeders do -- and give storage
+-- room for the larger pristine base reserve.
+Sim.install(config, config.sites, {
+  hard = hardMode,
+  mutationGraph = mutationGraph,
+  mutationLeaves = mutationLeaves,
+  mutationBoost = genebankMode and 6 or 1,
+  storageSize = genebankMode and 160 or nil,
+})
 
 local M = require("bee_keeper_manager")
 local Nav = require("bee_keeper_nav")

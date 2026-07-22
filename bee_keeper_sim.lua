@@ -482,6 +482,12 @@ function M.newWorld(config, sites, opts)
     -- set to model gating -- makeOffspring only fires a conditioned
     -- mutation once all its conditions are members.
     satisfiedConditions = nil,
+
+    -- Multiplier on mutation chance -- models Forestry mutation-boosting FRAMES
+    -- (soul/metabolic/frenzy), which real breeders rely on so a single
+    -- purebred x purebred cross reliably yields the mutation instead of burning
+    -- many princesses at the base ~8-15% rate. Default 1 (no frames).
+    mutationBoost = opts.mutationBoost or 1,
   }
 
   -- Directional pair index for mutation rolls: "<princessSpecies>|<droneSpecies>"
@@ -650,7 +656,7 @@ function M.newWorld(config, sites, opts)
         -- a leaf princess line can dwindle under several contending apiaries.
         -- Stock a reserve in storage (restockFromStorage pulls them back)
         -- so a multi-step demo doesn't stall waiting on a base princess.
-        local LEAF_PRINCESS_RESERVE = 6
+        local LEAF_PRINCESS_RESERVE = 40
         for _, leaf in ipairs(leaves) do
           put(makeStartingRaw(traitList, leaf), "princess")
           put(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
@@ -1011,7 +1017,8 @@ function M.install(config, sites, opts)
             local recipes = world.mutationPairIndex[P .. "|" .. D]
             if recipes then
               for _, recipe in ipairs(recipes) do
-                if world.conditionsMet(recipe.conditions) and math.random(100) <= recipe.chance then
+                local boosted = math.min(100, (recipe.chance or 0) * (world.mutationBoost or 1))
+                if world.conditionsMet(recipe.conditions) and math.random(100) <= boosted then
                   local sp = { name = recipe.result, uid = "sim." .. recipe.result:lower(), humidity = "Normal", temperature = "Normal" }
                   child.species = { active = sp, inactive = sp }
                   break
