@@ -560,28 +560,6 @@ function M.ownedSpecies(config)
       end
     end
   end
-
-  -- In genebank mode, ownership is by PUREBRED princess, and a PRODUCIBLE
-  -- (intermediate) species only counts once it has a SURPLUS purebred princess
-  -- beyond its reserve -- i.e. one it can actually spend into the next mutation.
-  -- Below that, we want the planner to keep mutating MORE of the intermediate
-  -- (a mutation yields purebred specimens) rather than call it "owned" and then
-  -- stall downstream. Base species (not producible) can't be mutated into, so a
-  -- single purebred princess is enough to count them owned (their pristine
-  -- supply / pure x pure maintenance keeps them going).
-  if config.genebank and config.mutationGraph then
-    local summary = M.genebankScan(config)
-    local producible = config.mutationGraph.producible or {}
-    local minP = GB.minPrincesses(config.genebank)
-    local rebuilt = {}
-    for species, s in pairs(summary) do
-      if s.purePrincesses >= 1 then
-        local reserve = producible[species] and minP or 0
-        if s.purePrincesses > reserve then rebuilt[species] = true end
-      end
-    end
-    owned = rebuilt
-  end
   return owned
 end
 
@@ -631,32 +609,10 @@ function M.planMutationStep(config, targetSpecies, traitList)
   local step = plan.steps[1]
   local held = groupBySpecies(config)
 
-  -- Satisfiability of a recipe from current stock. In GENEBANK mode this must
-  -- agree with ownedSpecies and the reserve gate, or the planner proposes a step
-  -- the gate then refuses (a "building_intermediate" limbo that breeds nothing):
-  --   * princess parent must have a SPENDABLE surplus purebred princess (a
-  --     producible intermediate keeps >=minPrincesses in reserve; a base species
-  --     with its pristine supply just needs >=1);
-  --   * drone parent must have purebred drones to spend now, OR a purebred
-  --     princess+drone the gate can grow the bank from (M.maintainBankAt).
-  -- Without genebank it's the old "any princess + any drone" check.
-  local gbSummary = config.genebank and M.genebankScan(config) or nil
-  local gbProducible = (graph.producible) or {}
-  local function princessSpendable(sp)
-    local s = gbSummary[sp] or {}
-    local reserve = gbProducible[sp] and GB.minPrincesses(config.genebank) or 0
-    return (s.purePrincesses or 0) > reserve
-  end
-  local function droneAvailable(sp)
-    local s = gbSummary[sp] or {}
-    local reserve = gbProducible[sp] and GB.minDrones(config.genebank) or 0
-    return (s.pureDrones or 0) > reserve
-      or ((s.purePrincesses or 0) >= 1 and (s.pureDrones or 0) >= 1)
-  end
+  -- Satisfiability of a recipe from current stock: a genuine princess/queen of
+  -- the allele1 species and a genuine drone of the allele2 species. (Genebank
+  -- mode uses the bee_genebank_scheduler path instead of this planner.)
   local function satisfiable(r)
-    if config.genebank then
-      return princessSpendable(r.princess) and droneAvailable(r.drone)
-    end
     local pg, dg = held[r.princess], held[r.drone]
     return pg and #pg.princesses > 0 and dg and #dg.drones > 0
   end
@@ -762,67 +718,6 @@ function M.isSpeciesPurebred(individual, species)
   return BB.traitState(g, "species") == "GG"
 end
 
--- Scans cargo into (a) a bee_genebank summary and (b) an index of slots by
--- species/role/purity so the caller can actually pick a pure specimen to load.
--- index[species] = { purePrincess={slots}, impurePrincess={}, pureDrone={}, impureDrone={} }
-function M.genebankScan(config)
-  local entries, index = {}, {}
-  for _, slot in ipairs(config.workingSlots) do
-    local stack = invCtrl().getStackInInternalSlot(slot)
-    local ind = readIndividual(stack)
-    if ind and ind.active and ind.active.species then
-      local role = isPrincessOrQueenStack(stack) and "princess"
-        or (isDroneStack(stack) and "drone" or nil)
-      if role then
-        local species = Cfg.speciesKey(ind.active.species)
-        local pure = M.isSpeciesPurebred(ind, species)
-        -- A stacked drone slot stands for many drones -- count the whole stack,
-        -- so the reserve is a real quantity, not a slot count.
-        table.insert(entries, { species = species, role = role, speciesPure = pure, count = stack.size or 1 })
-        index[species] = index[species]
-          or { purePrincess = {}, impurePrincess = {}, pureDrone = {}, impureDrone = {} }
-        local bucket = (role == "princess")
-          and (pure and "purePrincess" or "impurePrincess")
-          or (pure and "pureDrone" or "impureDrone")
-        table.insert(index[species][bucket], slot)
-      end
-    end
-  end
-  return GB.summarize(entries), index
-end
-
--- A cargo slot holding a PUREBRED princess / drone of `species` (nil if none).
-local function findPurePrincessSlot(config, species)
-  local _, index = M.genebankScan(config)
-  return index[species] and index[species].purePrincess[1] or nil
-end
-local function findPureDroneSlot(config, species)
-  local _, index = M.genebankScan(config)
-  return index[species] and index[species].pureDrone[1] or nil
-end
-
--- Maintains a species' bank by breeding it PURE x PURE (a purebred princess x a
--- purebred drone of the same species). Purebred x purebred of one species always
--- yields purebred offspring, so the line never drifts -- this is the ONLY way a
--- bank is grown/sustained. (We never breed a hybrid back toward a species; that's
--- the drift bug -- hybrids are junked instead, see M.junkHybrids.) Returns a
--- status string.
-function M.maintainBankAt(config, site, species)
-  local down = sides().down
-  local pSlot = findPurePrincessSlot(config, species)
-  if not pSlot then return "need_pristine_princess:" .. species end
-  Status.setStep("Maintaining " .. species .. " bank at " .. (site.name or "?"))
-  agent().select(pSlot)
-  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-  local dSlot = findPureDroneSlot(config, species)
-  if not dSlot then return "need_pure_drone:" .. species end
-  dSlot = ensureSingleItemSlot(config, dSlot)
-  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
-  agent().select(dSlot)
-  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
-  return "maintaining " .. species
-end
-
 -- Junk the useless hybrid (non-purebred) byproducts of mutation crosses so they
 -- don't pile up and crowd the banks out of cargo. What's junked:
 --   * every hybrid DRONE (pure fodder -- breeding it drifts a bank), and
@@ -849,94 +744,6 @@ function M.junkHybrids(config, site)
   if config.trashPos then return M.dumpToTrash(config, entries, nil) end
   if config.storagePos then return M.dumpToStorage(config, entries, nil) end
   return 0
-end
-
--- A cargo princess usable to CONVERT toward `species`: she carries a `species`
--- allele (active or inactive) but isn't already pure, so breeding her against
--- pure `species` drones converges her line to homozygous `species` over a couple
--- of generations. These are the pristine HYBRID byproducts of mutation crosses --
--- since a pristine princess is never lost (she always yields a replacement
--- princess), recycling them this way RENEWS a species' supply instead of
--- exhausting a finite seed. Returns a slot, or nil.
-local function findConversionVessel(config, species)
-  for _, slot in ipairs(config.workingSlots) do
-    local stack = invCtrl().getStackInInternalSlot(slot)
-    local ind = readIndividual(stack)
-    if ind and isPrincessOrQueenStack(stack) and ind.active and ind.inactive
-      and ind.active.species and ind.inactive.species then
-      local a = Cfg.speciesKey(ind.active.species)
-      local i = Cfg.speciesKey(ind.inactive.species)
-      if (a == species or i == species) and not (a == species and i == species) then
-        return slot
-      end
-    end
-  end
-  return nil
-end
-
--- Convert a pristine hybrid princess toward `species`: breed her against a pure
--- `species` drone. Her line's genotype converges to homozygous `species` (the
--- robot judges by genotype, not the displayed dominant species). This is how a
--- base species' princess supply is renewed from byproducts -- the piece that
--- keeps a deep tree from exhausting its pristine base stock. Status string.
-function M.convertToward(config, site, species)
-  local down = sides().down
-  local dSlot = findPureDroneSlot(config, species)
-  if not dSlot then return "cannot_convert_no_pure_drone:" .. species end
-  local vessel = findConversionVessel(config, species)
-  if not vessel then return "need_pristine:" .. species end
-  Status.setStep("Converting a princess toward " .. species .. " at " .. (site.name or "?"))
-  agent().select(vessel)
-  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-  dSlot = ensureSingleItemSlot(config, dSlot)
-  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
-  agent().select(dSlot)
-  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
-  return "converting toward " .. species
-end
-
--- When planning is blocked for lack of a base species' princess, renew that
--- supply by converting a pristine hybrid byproduct back into it (see
--- M.convertToward). Scans the configured breeder/base species for one that has a
--- conversion vessel + pure drones but no pure princess right now. Returns a
--- status string if it acted, or nil if there's nothing to renew.
-function M.renewBaseSupply(config, site)
-  local _, index = M.genebankScan(config)
-  local breeders = (config.genebank and config.genebank.breederSpecies) or {}
-  for _, sp in ipairs(breeders) do
-    local g = index[sp]
-    local hasPurePrincess = g and #g.purePrincess >= 1
-    local hasPureDrone = g and #g.pureDrone >= 1
-    if not hasPurePrincess and hasPureDrone and findConversionVessel(config, sp) then
-      return M.convertToward(config, site, sp)
-    end
-  end
-  return nil
-end
-
--- ============================================================
--- Scheduler-driven mutation (bee_genebank_scheduler): build purebred banks
--- bottom-up to full reserve, then spend them -- the fix for deep (3+ step) trees.
--- ============================================================
-
--- Count of pristine HYBRID princesses in cargo carrying each species' allele --
--- the conversion fodder the scheduler counts on to renew a species' supply.
-function M.countConvertible(config)
-  local c = {}
-  for _, slot in ipairs(config.workingSlots) do
-    local stack = invCtrl().getStackInInternalSlot(slot)
-    local ind = readIndividual(stack)
-    if ind and isPrincessOrQueenStack(stack) and ind.active and ind.inactive
-      and ind.active.species and ind.inactive.species then
-      local a = Cfg.speciesKey(ind.active.species)
-      local i = Cfg.speciesKey(ind.inactive.species)
-      if a ~= i then -- hybrid: carries both alleles, so it can convert toward either
-        c[a] = (c[a] or 0) + 1
-        c[i] = (c[i] or 0) + 1
-      end
-    end
-  end
-  return c
 end
 
 -- ============================================================
