@@ -136,14 +136,38 @@ local function pickRawAllele(alleles)
   return alleles.inactive
 end
 
+-- Deterministic, ARBITRARY dominance rank for a species name (higher = more
+-- dominant). Real per-species dominance isn't exposed by the OC API (the probe
+-- showed no such method), and the robot's logic must be correct for ANY
+-- dominance assignment -- so the sim just needs a stable pseudo-rank to
+-- reproduce the real behavior "a hybrid expresses its DOMINANT species allele as
+-- active" (see docs/gtnh_bee_genetics.md). That's what forces the genebank to
+-- reason by GENOTYPE (active==inactive) rather than by the displayed species,
+-- and is exactly the case that bit the old naive purification.
+local function speciesDominanceRank(name)
+  local h = 0
+  for i = 1, #name do h = (h * 31 + name:byte(i)) % 1000003 end
+  return h
+end
+M.speciesDominanceRank = speciesDominanceRank
+
 -- parentA/parentB: { [trait] = { active = rawValue, inactive = rawValue } }
+-- Each offspring allele is one random pick from each parent. For the SPECIES
+-- locus the expressed (active) allele is then the DOMINANT of the two (higher
+-- rank); on a tie, or equal species, order is left as-is. Other traits keep the
+-- simple active=parentA / inactive=parentB assignment (dominance there doesn't
+-- affect the species-drift problem and would perturb the traitmax tests).
 local function crossRaw(traitList, parentA, parentB)
   local child = {}
   for _, trait in ipairs(traitList) do
-    child[trait] = {
-      active = pickRawAllele(parentA[trait]),
-      inactive = pickRawAllele(parentB[trait]),
-    }
+    local a = pickRawAllele(parentA[trait])
+    local b = pickRawAllele(parentB[trait])
+    if trait == "species" and a and b and a.name and b.name then
+      if speciesDominanceRank(b.name) > speciesDominanceRank(a.name) then
+        a, b = b, a
+      end
+    end
+    child[trait] = { active = a, inactive = b }
   end
   return child
 end
