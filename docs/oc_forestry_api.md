@@ -111,9 +111,24 @@ genome shape (via `ConverterIIndividual`) is:
     effect="<unlocalized name>", territory=<area value> },
   inactive = { ...same keys... } }
 ```
-**Matches `bee_trait_config.lua`'s `normalizeGenotype` exactly.** (Live genome sample
-still TODO — needs an analyzed queen in the apiary during the dump; the first dump had an
-empty apiary so `getQueen()`/`getDrone()` returned nil.)
+**Matches `bee_trait_config.lua`'s `normalizeGenotype` exactly.**
+
+**DOMINANCE (confirmed on a live hybrid — `scripts/probe_dominance.lua`):** for every
+trait, `active` = the **dominant / expressed** allele and `inactive` = the **recessive**
+one. The mod resolves dominance for us — you never compute it. A hybrid queen dumped from
+hardware: `active.species = Eldritch` (magicbees), `inactive.species = Tolerant`
+(extrabees) — it displays and behaves as **Eldritch** because Eldritch is dominant over
+Tolerant, with `displayName="Eldritch"` and `ident` = the active species uid. So:
+- A bee's **expressed species** (what it "is") = `active.species`.
+- A bee is **purebred** for a species iff `active.species == inactive.species` (both == it).
+- Breeding: a mutation needs the two parent *alleles* (active/inactive), not just the
+  expressed one; conversion/purification progress is judged by **genotype** (both alleles
+  homozygous), not by which one shows as active.
+
+**`isNatural`** on the individual = the **pristine (true) vs ignoble (false)** flag — this
+is what drives the `pristineOnly` breeder rule (both probe samples were `isNatural=true`;
+confirm `false` on an ignoble princess). `isSecret` is unrelated (the species' "secret"
+research flag).
 
 ### `canBreed()` → boolean.
 
