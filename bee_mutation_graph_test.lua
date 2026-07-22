@@ -116,6 +116,43 @@ do
 end
 
 -- ============================================================
+-- traverseTree: decoupled topological walk (shared by plan/execution/display)
+-- ============================================================
+do
+  -- E needs C+D; C needs A+B; D needs C+X. Owned A,B,X. C is shared by E and D
+  -- and must be visited once, before both.
+  local g = MG.build({
+    { allele1 = "A", allele2 = "B", chance = 10, result = "C", specialConditions = {} },
+    { allele1 = "C", allele2 = "X", chance = 10, result = "D", specialConditions = {} },
+    { allele1 = "C", allele2 = "D", chance = 10, result = "E", specialConditions = {} },
+  })
+  local owned = set("A", "B", "X")
+  local costs = MG.computeCosts(g, owned)
+
+  local order, visitCount, leaves = {}, {}, {}
+  MG.traverseTree(costs.recipe, owned, "E",
+    function(sp) table.insert(order, sp); visitCount[sp] = (visitCount[sp] or 0) + 1 end,
+    function(leaf) leaves[leaf] = true end)
+
+  check("traverseTree visits each bred species exactly once",
+    visitCount.C == 1 and visitCount.D == 1 and visitCount.E == 1)
+  -- position checks: C before D, C before E, D before E
+  local pos = {}; for i, s in ipairs(order) do pos[s] = i end
+  check("traverseTree is topological (shared intermediate first)",
+    pos.C < pos.D and pos.C < pos.E and pos.D < pos.E, table.concat(order, ","))
+  check("traverseTree does not visit owned species (boundary)",
+    visitCount.A == nil and visitCount.B == nil and visitCount.X == nil)
+  check("traverseTree reports no missing leaves when all leaves owned", next(leaves) == nil)
+
+  -- Drop X from owned -> it becomes an acquirable missing leaf reported via onLeaf.
+  local owned2 = set("A", "B")
+  local costs2 = MG.computeCosts(g, owned2)
+  local leaves2 = {}
+  MG.traverseTree(costs2.recipe, owned2, "E", function() end, function(l) leaves2[l] = true end)
+  check("traverseTree onLeaf reports an unowned base leaf", leaves2.X == true)
+end
+
+-- ============================================================
 -- Path selection: least special-condition burden dominates
 -- ============================================================
 do

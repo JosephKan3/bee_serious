@@ -129,9 +129,14 @@ empty apiary so `getQueen()`/`getDrone()` returned nil.)
 
 ---
 
-## Re-dump procedure (stationary computer + Adapter next to an apiary)
-1. `local c=require("component"); local ser=require("serialization"); local d=c.tile_for_apiculture_0_name.getBeeBreedingData(); local f=io.open("bee_mutations.dat","w"); f:write(ser.serialize(d)); f:close(); print(#d.." mutations")`
-2. `... c.tile_for_apiculture_0_name.listAllSpecies() ...` → `species.dat`
-3. With an analyzed queen in the apiary: `... c.tile_for_apiculture_0_name.getQueen() ...` → `queen_genome.dat` (for the traitmax species→template map).
+## Re-dump procedure (after a GTNH version bump)
+Use the committed script **`scripts/dump_bee_data.lua`** — copy it onto a
+stationary OC computer with an Adapter next to an apiary and run it. It
+auto-discovers the housing component by capability (has `getBeeBreedingData`, so
+it survives the component being renamed between versions), then writes
+`bee_mutations.dat`, `bee_species.dat`, and (if an analyzed queen is present)
+`queen_genome.dat`. Copy those back into the repo, replacing the committed
+copies, and commit.
 
-`serialization.serialize()` output is valid Lua — load it with `load("return "..s)()`.
+`serialization.serialize()` output is valid Lua — load it with `load("return "..s)()`
+(this is what `bee_mutation_graph.M.parse` does).

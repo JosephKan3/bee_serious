@@ -12,10 +12,9 @@
     { allele1="Forest", allele2="Meadows", chance=15.0, result="Common",
       specialConditions={ "Occurs within a plains biome.", ... } }
   allele1/allele2/result are plain species DISPLAY NAMES (strings). allele1 =
-  getAllele0(), allele2 = getAllele1(). Per the user, princess/drone DIRECTION
-  matters for triggering a mutation (not for normal inheritance); the safe
-  default (verified later by a real test-breed) is allele1 = princess,
-  allele2 = drone.
+  getAllele0(), allele2 = getAllele1(). Princess/drone DIRECTION matters for
+  triggering a mutation (not for normal inheritance), and the mapping is
+  CONFIRMED: allele1 = princess, allele2 = drone.
 
   PATH SELECTION (user's call): when multiple breeding paths reach a target,
   prefer the LEAST special-condition burden -- weight each step by how hard its
@@ -177,10 +176,39 @@ function M.computeCosts(graph, owned)
   return { cost = cost, recipe = recipe }
 end
 
+-- Walks the chosen-recipe tree (costs.recipe, from computeCosts) rooted at
+-- `target` in TOPOLOGICAL order: visit(species, recipe) fires for each species
+-- that must be BRED (has a chosen recipe) only AFTER both its parents have been
+-- walked. Shared intermediates are visited exactly once; cycle-safe. Traversal
+-- stops at owned species (a boundary). onLeaf(species), if given, fires once
+-- per acquirable base leaf the tree depends on (reachable, not owned, no chosen
+-- recipe).
+--
+-- Deliberately DECOUPLED from any plan/cost/plan-shape concern -- it's the one
+-- canonical tree walk reused by plan building (below), by execution (breed each
+-- visited step in order), by condition scanning, and by display. Pure.
+function M.traverseTree(recipe, owned, target, visit, onLeaf)
+  owned = owned or {}
+  local seen = {}
+  local function walk(species)
+    if owned[species] or seen[species] then return end
+    seen[species] = true
+    local r = recipe[species]
+    if not r then
+      if onLeaf then onLeaf(species) end
+      return
+    end
+    walk(r.princess)
+    walk(r.drone)
+    visit(species, r)
+  end
+  walk(target)
+end
+
 -- Plans a breeding tree for one target from a precomputed cost table (from
 -- M.computeCosts). Kept separate so a caller checking many targets against the
 -- same owned set computes the fixpoint ONCE (see the real-data test / any
--- future "which of these can I make" query).
+-- future "which of these can I make" query). Just accumulates M.traverseTree.
 --
 -- Returns:
 --   { reachable=bool, alreadyOwned=bool,
@@ -199,25 +227,15 @@ function M.buildPlan(owned, target, costs)
     return { reachable = false, alreadyOwned = false, steps = {}, missingLeaves = {}, totalCost = nil }
   end
 
-  local steps, emitted, missing = {}, {}, {}
-  local function emit(species)
-    if owned[species] or emitted[species] then return end
-    local r = costs.recipe[species]
-    if not r then
-      -- Reachable but no chosen recipe -> an acquirable base leaf this tree
-      -- depends on (not owned). Record it; nothing to breed.
-      if not owned[species] then missing[species] = true end
-      return
-    end
-    emit(r.princess)
-    emit(r.drone)
-    emitted[species] = true
-    table.insert(steps, {
-      result = species, princess = r.princess, drone = r.drone,
-      chance = r.chance, conditions = r.conditions,
-    })
-  end
-  emit(target)
+  local steps, missing = {}, {}
+  M.traverseTree(costs.recipe, owned, target,
+    function(species, r)
+      table.insert(steps, {
+        result = species, princess = r.princess, drone = r.drone,
+        chance = r.chance, conditions = r.conditions,
+      })
+    end,
+    function(leaf) missing[leaf] = true end)
 
   return {
     reachable = true, alreadyOwned = false, steps = steps,
