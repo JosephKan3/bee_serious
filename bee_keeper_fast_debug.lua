@@ -46,10 +46,64 @@ for _, a in ipairs(args) do
   if a == "hard" then hardMode = true end
 end
 if mode == "species" then targetSpecies = targetSpecies or "Sticky"
-elseif mode == "mutation" then targetSpecies = targetSpecies or "NewBee" end
+elseif mode == "mutation" then targetSpecies = targetSpecies or "Common" end
 
 local Sim = require("bee_keeper_sim")
+local MG = require("bee_mutation_graph")
 local config = require("bee_keeper_manager_config")
+
+-- Load the REAL GTNH mutation graph for mutation-mode runs, so the sim
+-- breeds using the actual directional recipes (not a hand-written demo
+-- table) and the manager plans the real tree toward targetSpecies. The
+-- default target "Common" is a one-step mutation (Forest princess x
+-- Meadows drone) reachable from the sim's seeded mutation-site stock;
+-- pass a deeper target as arg 3 to exercise a multi-step tree.
+local mutationGraph = nil
+if mode == "mutation" then
+  local f = io.open("bee_mutations.dat", "r")
+  if f then
+    local ok, g = pcall(MG.parse, f:read("*a"))
+    f:close()
+    if ok then mutationGraph = g end
+  end
+  if not mutationGraph then
+    print("WARNING: bee_mutations.dat not loaded -- falling back to a demo recipe (target 'NewBee').")
+    targetSpecies = "NewBee"
+    -- Build a tiny demo graph so the MANAGER can still plan (it needs
+    -- config.mutationGraph regardless of what the sim breeds), matching the
+    -- sim's own NewBee demo pair (Forest princess x Meadows drone).
+    mutationGraph = MG.build({ { allele1 = "Forest", allele2 = "Meadows", result = "NewBee", chance = 50 } })
+    config.mutationGraph = mutationGraph
+  else
+    config.mutationGraph = mutationGraph
+    -- Auto-confirm any special-condition gate so a headless run never
+    -- blocks; also mark those conditions satisfied in the sim world so the
+    -- conditioned mutation can actually fire (see Sim world below).
+    config.confirmCondition = function(conditions)
+      if Sim.world and conditions then
+        Sim.world.satisfiedConditions = Sim.world.satisfiedConditions or {}
+        for _, c in ipairs(conditions) do Sim.world.satisfiedConditions[c] = true end
+      end
+      return true
+    end
+  end
+end
+
+-- The base leaf bees the target's whole tree needs (computed from the real
+-- graph, empty starting stock) -- handed to the sim so it seeds exactly
+-- those, letting a multi-step target breed to completion headlessly.
+local mutationLeaves = nil
+if mutationGraph then
+  local plan = MG.planBreedingTree(mutationGraph, {}, targetSpecies)
+  if plan.reachable then
+    mutationLeaves = plan.missingLeaves
+    if #mutationLeaves > 0 then
+      print("Target '" .. targetSpecies .. "' needs base leaf bees: " .. table.concat(mutationLeaves, ", "))
+    end
+  else
+    print("WARNING: target '" .. targetSpecies .. "' is unreachable in the mutation graph.")
+  end
+end
 
 local SITE_COUNT = 3
 local sitePositions = { { x = 4, z = 3 }, { x = -3, z = 6 }, { x = 8, z = -5 } }
@@ -65,7 +119,7 @@ config.trashPos = config.trashPos or { x = -8, z = -8 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
 config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
 
-Sim.install(config, config.sites, { hard = hardMode })
+Sim.install(config, config.sites, { hard = hardMode, mutationGraph = mutationGraph, mutationLeaves = mutationLeaves })
 
 local M = require("bee_keeper_manager")
 local Nav = require("bee_keeper_nav")

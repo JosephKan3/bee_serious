@@ -98,15 +98,11 @@ return {
   chargeThreshold = 0.2,
   chargerPos = { x = 0, z = 0 },
 
-  -- Optional static mutation fallback, same shape bee_housing.getBeeParents
-  -- would return, keyed by target species name. Only consulted if the live
-  -- bee_housing lookup isn't reachable (see bee_keeper_manager.lua's
-  -- header notes on this being unconfirmed for a moving agent).
-  mutationFallback = {
-    -- ["NewSpeciesName"] = {
-    --   { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
-    -- },
-  },
+  -- DEPRECATED / unused: mutation recipes now come from the committed
+  -- bee_mutations.dat dump, loaded into config.mutationGraph at startup by
+  -- bee_keeper_manager_run.lua (see M.loadMutationGraph). Left here only so
+  -- old configs don't error; nothing reads it anymore.
+  mutationFallback = {},
 
   -- What each discovered site (by the name the scan assigned -- "site1",
   -- "site2", ...) should be doing. Anything not listed here defaults to

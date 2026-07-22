@@ -48,11 +48,13 @@ localized-name strings**; `specialConditions` is an array of human-readable stri
 { specialConditions={"Requires Entropy Crystal Cluster as a foundation."}, result="Essentia", allele2="Chaotic", allele1="Ordered", chance=8.0 }
 ```
 
-`allele1`=`getAllele0()`, `allele2`=`getAllele1()` (ordered pair). **Direction:** the
-user reports princess/drone direction matters for *triggering* a mutation (not for
-normal inheritance). Vanilla Forestry checks both orders; whether GTNH enforces one, and
-if so which of allele1/allele2 is the princess side, is still to be verified with one
-real test-breed. Safe default: allele1 = princess, allele2 = drone.
+`allele1`=`getAllele0()`, `allele2`=`getAllele1()` (ordered pair). **Direction
+(CONFIRMED):** princess/drone direction matters for *triggering* a mutation (not for
+normal inheritance), and the mapping is **allele1 = princess, allele2 = drone**. The
+tree planner (bee_mutation_graph.lua) and the executor (bee_keeper_manager.lua's
+runMutationSite) load the allele1-species specimen into the queen slot and the
+allele2-species specimen into the drone slot, in that exact order -- they do NOT fall
+back to the reverse arrangement.
 
 ### `getBeeBreedingData()` — live dataset stats (GTNH 2.8.4, 2024 dump)
 - **538 mutations**, **430 distinct species**.

@@ -230,6 +230,14 @@ package.loaded["robot"] = {
 
 local M = require("bee_keeper_manager")
 local Cfg = require("bee_trait_config")
+local MG = require("bee_mutation_graph")
+
+-- Builds config.mutationGraph from a plain list of raw mutations (the
+-- getBeeBreedingData shape: {allele1=, allele2=, result=, chance=,
+-- specialConditions=}) -- allele1 = princess, allele2 = drone.
+local function buildGraph(mutations)
+  return MG.build(mutations)
+end
 
 local failures = 0
 local function check(name, cond, detail)
@@ -572,33 +580,31 @@ do
 end
 
 -- ============================================================
--- Test: mutation mode matches held species against recipes and swaps in
--- the correct pair
+-- Test: mutation mode loads the DIRECTIONAL pair -- allele1=princess,
+-- allele2=drone -- for a satisfiable recipe, from the graph.
 -- ============================================================
 
 do
   world.apiaries = {}
   world.agentInventory = {}
   world.dronePos = { x = 20, z = 3 }
-  world._mutationRecipes = {
-    ["NewSpecies"] = {
-      { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
-      { allele1 = { name = "Common" }, allele2 = { name = "Cultivated" }, chance = 8 },
-    },
-  }
 
   local traitList = M.traitListFor("mutation")
   local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
   local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
 
-  -- Only Forest x Meadows is satisfiable (no Common/Cultivated held) --
-  -- should be the one picked even though it's not literally the only
-  -- recipe. One princess, one drone -- a real mutation needs exactly one
-  -- of each (Forestry doesn't care which named species is which side).
+  -- Recipe: Forest (princess) x Meadows (drone) -> NewSpecies. Cargo has
+  -- a Forest PRINCESS and a Meadows DRONE, i.e. exactly the canonical
+  -- direction.
   world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
   world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
 
-  local config = { workingSlots = { 3, 4 } }
+  local config = {
+    workingSlots = { 3, 4 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Meadows", result = "NewSpecies", chance = 12 },
+    }),
+  }
   local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
 
   local status = M.runMutationSite(config, site)
@@ -608,71 +614,187 @@ do
 
   local queenSpecies = Cfg.speciesKey(apiary(DOWN)[1].individual.active.species)
   local droneSpecies = Cfg.speciesKey(apiary(DOWN)[2].individual.active.species)
-  check("runMutationSite used the satisfiable Forest/Meadows pair",
-    (queenSpecies == "Forest" and droneSpecies == "Meadows") or (queenSpecies == "Meadows" and droneSpecies == "Forest"),
+  check("princess side is allele1 (Forest), drone side is allele2 (Meadows) -- directional",
+    queenSpecies == "Forest" and droneSpecies == "Meadows",
     "queen=" .. tostring(queenSpecies) .. " drone=" .. tostring(droneSpecies))
 end
 
 -- ============================================================
--- Test: mutation mode must NOT attempt a pairing when cargo has the
--- right SPECIES but the wrong ITEM TYPES -- two drones, no princess at
--- all. groupBySpecies used to lump princess/drone items together by
--- species alone, so "the best-scoring Forest bee" could actually be a
--- drone, picked for the princess role and handed to swapQueen (which
--- real Forestry -- and this codebase's own type-checked simulator --
--- rejects). Must report waiting, not attempt with mismatched types.
+-- Test: DIRECTION is enforced -- a recipe Forest(princess) x Meadows(drone)
+-- is NOT satisfied by a Forest DRONE + Meadows PRINCESS (roles reversed).
+-- The planner must wait, not silently breed the reverse arrangement, since
+-- direction can matter for triggering the mutation.
 -- ============================================================
 
 do
   world.apiaries = {}
   world.agentInventory = {}
   world.dronePos = { x = 20, z = 3 }
-  world._mutationRecipes = {
-    ["NewSpecies"] = {
-      { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
-    },
-  }
 
   local traitList = M.traitListFor("mutation")
   local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
   local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
 
-  -- BOTH drones -- no princess of either species anywhere in cargo.
+  -- Reversed roles vs the recipe: Forest as a drone, Meadows as a princess.
   world.agentInventory[3] = mockDroneStack(forestActive, forestInactive, true)
-  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
+  world.agentInventory[4] = mockPrincessStack(meadowsActive, meadowsInactive, true)
 
-  local config = { workingSlots = { 3, 4 } }
+  local config = {
+    workingSlots = { 3, 4 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Meadows", result = "NewSpecies", chance = 12 },
+    }),
+  }
   local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
 
   local status = M.runMutationSite(config, site)
-  check("runMutationSite reports waiting -- species match but no real princess exists",
+  check("runMutationSite waits when only the REVERSED role arrangement is available",
     status:match("^waiting_on_parent_species") ~= nil, status)
-  check("runMutationSite never touched the apiary's queen slot",
-    apiary(DOWN)[1] == nil)
+  check("directional wait names the needed princess of Forest",
+    status:find("princess/queen of 'Forest'", 1, true) ~= nil, status)
+  check("runMutationSite never touched the apiary's queen slot", apiary(DOWN)[1] == nil)
 end
 
 -- ============================================================
--- Test: mutation mode reports missing parents when nothing's satisfiable
+-- Test: MULTI-STEP tree -- to reach a target two mutations deep, the site
+-- acts on the FIRST (deepest) actionable step first and labels it as being
+-- "toward" the intermediate, not the final target.
 -- ============================================================
 
 do
   world.apiaries = {}
   world.agentInventory = {}
   world.dronePos = { x = 20, z = 3 }
-  world._mutationRecipes = {
-    ["NewSpecies"] = {
-      { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 12 },
-    },
+
+  local traitList = M.traitListFor("mutation")
+  local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
+  local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
+  local cultivatedActive, cultivatedInactive = makeAlleles(traitList, { species = { name = "Cultivated" } })
+
+  -- Forest(P) x Meadows(D) -> Common;  Common(P) x Cultivated(D) -> Target.
+  -- Owned: Forest princess, Meadows drone, and Cultivated (boundary). The
+  -- first actionable step is Common (its parents are on hand).
+  world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
+  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
+  world.agentInventory[5] = mockBeeStack(cultivatedActive, cultivatedInactive, true)
+
+  local config = {
+    workingSlots = { 3, 4, 5 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Meadows", result = "Common", chance = 12 },
+      { allele1 = "Common", allele2 = "Cultivated", result = "Target", chance = 10 },
+    }),
   }
-  local config = { workingSlots = { 3, 4 } }
-  local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
+  local site = { name = "tree-site", x = 20, z = 3, mode = "mutation", targetSpecies = "Target" }
 
   local status = M.runMutationSite(config, site)
-  check("runMutationSite reports waiting when parents aren't held", status:match("^waiting_on_parent_species") ~= nil, status)
+  check("multi-step: acts on the first intermediate step (Common)",
+    status:match("^attempting mutation") ~= nil and status:find("toward Common", 1, true) ~= nil, status)
+  local queenSpecies = Cfg.speciesKey(apiary(DOWN)[1].individual.active.species)
+  local droneSpecies = Cfg.speciesKey(apiary(DOWN)[2].individual.active.species)
+  check("multi-step: loaded Forest(princess) x Meadows(drone) for the Common step",
+    queenSpecies == "Forest" and droneSpecies == "Meadows",
+    "queen=" .. tostring(queenSpecies) .. " drone=" .. tostring(droneSpecies))
 end
 
 -- ============================================================
--- Test: mutation mode detects success and hands off
+-- Test: SPECIAL-CONDITION gate -- a step whose recipe carries conditions
+-- the robot can't provide defers (does not breed) when the confirmer says
+-- no, and proceeds once it says yes.
+-- ============================================================
+
+do
+  local traitList = M.traitListFor("mutation")
+  local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
+  local meadowsActive, meadowsInactive = makeAlleles(traitList, { species = { name = "Meadows" } })
+
+  local graph = buildGraph({
+    { allele1 = "Forest", allele2 = "Meadows", result = "NewSpecies", chance = 12,
+      specialConditions = { "Requires Block of Zinc as a foundation." } },
+  })
+
+  -- Confirmer says NO -> defers.
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+  world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
+  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
+  local sawConditions = nil
+  local configNo = {
+    workingSlots = { 3, 4 }, mutationGraph = graph,
+    confirmCondition = function(conds) sawConditions = conds; return false end,
+  }
+  local site = { name = "cond-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
+  local statusNo = M.runMutationSite(configNo, site)
+  check("special-condition gate defers when not confirmed",
+    statusNo:match("^awaiting_special_condition") ~= nil, statusNo)
+  check("the gate surfaced the actual condition string",
+    sawConditions and sawConditions[1] == "Requires Block of Zinc as a foundation.", statusNo)
+  check("no pair was loaded while awaiting the condition", apiary(DOWN)[1] == nil and apiary(DOWN)[2] == nil)
+
+  -- Confirmer says YES -> proceeds.
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+  world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
+  world.agentInventory[4] = mockDroneStack(meadowsActive, meadowsInactive, true)
+  local configYes = {
+    workingSlots = { 3, 4 }, mutationGraph = graph,
+    confirmCondition = function() return true end,
+  }
+  local statusYes = M.runMutationSite(configYes, site)
+  check("special-condition gate proceeds once confirmed",
+    statusYes:match("^attempting mutation") ~= nil, statusYes)
+  check("the pair was loaded after confirmation", apiary(DOWN)[1] ~= nil and apiary(DOWN)[2] ~= nil)
+end
+
+-- ============================================================
+-- Test: a required BASE LEAF the robot doesn't own is reported by name,
+-- so the user knows which bee to go gather.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+
+  local traitList = M.traitListFor("mutation")
+  local forestActive, forestInactive = makeAlleles(traitList, { species = { name = "Forest" } })
+  -- Only a Forest princess -- Meadows (the drone parent) is missing entirely.
+  world.agentInventory[3] = mockPrincessStack(forestActive, forestInactive, true)
+
+  local config = {
+    workingSlots = { 3, 4 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Meadows", result = "NewSpecies", chance = 12 },
+    }),
+  }
+  local site = { name = "leaf-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
+
+  local status = M.runMutationSite(config, site)
+  check("missing base leaf reported as waiting", status:match("^waiting_on_parent_species") ~= nil, status)
+  check("report names the missing drone parent (Meadows)",
+    status:find("Meadows", 1, true) ~= nil, status)
+end
+
+-- ============================================================
+-- Test: no graph loaded at all -> reports it plainly instead of crashing.
+-- ============================================================
+
+do
+  world.apiaries = {}
+  world.agentInventory = {}
+  world.dronePos = { x = 20, z = 3 }
+  local config = { workingSlots = { 3, 4 } } -- no mutationGraph
+  local site = { name = "no-graph-site", x = 20, z = 3, mode = "mutation", targetSpecies = "Whatever" }
+  local status = M.runMutationSite(config, site)
+  check("mutation with no graph reports no_mutation_graph_loaded",
+    status:find("no_mutation_graph_loaded", 1, true) ~= nil, status)
+end
+
+-- ============================================================
+-- Test: mutation mode detects the FINAL target already in hand and hands
+-- off (intermediates do NOT trigger handoff).
 -- ============================================================
 
 do
@@ -683,7 +805,12 @@ do
   local activeT, inactiveT = makeAlleles(traitList, { species = { name = "NewSpecies" } })
   world.agentInventory[9] = mockBeeStack(activeT, inactiveT, true)
 
-  local config = { workingSlots = { 9 } }
+  local config = {
+    workingSlots = { 9 },
+    mutationGraph = buildGraph({
+      { allele1 = "Forest", allele2 = "Meadows", result = "NewSpecies", chance = 12 },
+    }),
+  }
   local site = { name = "mutation-site", x = 20, z = 3, mode = "mutation", targetSpecies = "NewSpecies" }
   local status = M.runMutationSite(config, site)
   check("runMutationSite detects a targetSpecies bee already in hand", status == "mutation_succeeded:switch_site_to_species_mode", status)

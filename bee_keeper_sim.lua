@@ -443,13 +443,54 @@ function M.newWorld(config, sites, opts)
     recentlyMovedBeeStep = nil,
     stepCounter = 0,
     mutationRecipes = {
-      -- A generous chance so a local demo run actually shows a mutation
-      -- succeed within a reasonable number of cycles.
+      -- Demo fallback used ONLY when no real graph is supplied
+      -- (opts.mutationGraph) -- a generous chance so a quick local demo
+      -- shows a mutation succeed within a few cycles. Directional:
+      -- allele1 = princess, allele2 = drone.
       ["NewBee"] = {
         { allele1 = { name = "Forest" }, allele2 = { name = "Meadows" }, chance = 50 },
       },
     },
+    -- Set of special-condition strings the "user" has satisfied (foundation
+    -- block placed, in the right dimension, etc.). nil = permissive: every
+    -- condition is treated as met (the default for a headless demo, where
+    -- we assume the setup is in place). A test can set this to an explicit
+    -- set to model gating -- makeOffspring only fires a conditioned
+    -- mutation once all its conditions are members.
+    satisfiedConditions = nil,
   }
+
+  -- Directional pair index for mutation rolls: "<princessSpecies>|<droneSpecies>"
+  -- -> { { result, chance, conditions }, ... }. Built from the REAL GTNH
+  -- graph (opts.mutationGraph, a bee_mutation_graph.build result) when
+  -- given, else from the demo table above. allele1/princess is the first
+  -- key component, allele2/drone the second -- matching is NOT symmetric.
+  world.mutationPairIndex = {}
+  local function addPair(p, d, result, chance, conditions)
+    local key = p .. "|" .. d
+    world.mutationPairIndex[key] = world.mutationPairIndex[key] or {}
+    table.insert(world.mutationPairIndex[key], { result = result, chance = chance or 0, conditions = conditions or {} })
+  end
+  if opts.mutationGraph then
+    for result, recipes in pairs(opts.mutationGraph.byResult) do
+      for _, r in ipairs(recipes) do addPair(r.princess, r.drone, result, r.chance, r.conditions) end
+    end
+  else
+    for result, recipes in pairs(world.mutationRecipes) do
+      for _, r in ipairs(recipes) do addPair(r.allele1.name, r.allele2.name, result, r.chance, {}) end
+    end
+  end
+
+  -- Whether every one of a recipe's special conditions is currently
+  -- satisfied (see world.satisfiedConditions). Permissive by default.
+  function world.conditionsMet(conditions)
+    if not conditions or #conditions == 0 then return true end
+    if not world.satisfiedConditions then return true end
+    for _, c in ipairs(conditions) do
+      if not world.satisfiedConditions[c] then return false end
+    end
+    return true
+  end
 
   -- Sites start with EMPTY apiaries, regardless of mode -- a real apiary
   -- might have leftover state from previous Minecraft play the sim has
@@ -553,14 +594,29 @@ function M.newWorld(config, sites, opts)
   -- population's own 7, well past the usual 15 available).
   local seededSpecies = {}
   for _, s in ipairs(sites) do
-    if s.mode == "mutation" then
-      -- A real mutation pair needs ONE princess/queen + ONE drone
-      -- (Forestry doesn't care which named species ends up on which
-      -- side) -- seeding two drones here would make every mutation
-      -- attempt fail with swap_queen_failed, since nothing in cargo
-      -- would actually be a princess.
-      put(makeStartingRaw(traitList, "Forest"), "princess")
-      put(makeStartingRaw(traitList, "Meadows"), "drone")
+    if s.mode == "mutation" and not seededSpecies["mut:" .. tostring(s.targetSpecies)] then
+      seededSpecies["mut:" .. tostring(s.targetSpecies)] = true
+      -- Seed the BASE LEAF bees the target's breeding tree actually needs
+      -- (opts.mutationLeaves, computed by the caller from the real graph),
+      -- one princess AND one drone of each -- so the sim can execute the
+      -- WHOLE multi-step tree autonomously (each intermediate gets bred
+      -- from these, then combined further), and the manager's planner
+      -- deterministically prefers the path through these owned leaves.
+      -- Extra copies in storage give the run something to restock from as
+      -- the seed pairs get consumed. With no graph/leaves supplied, fall
+      -- back to the classic Forest(princess) x Meadows(drone) demo pair.
+      local leaves = opts.mutationLeaves
+      if leaves and #leaves > 0 then
+        for _, leaf in ipairs(leaves) do
+          put(makeStartingRaw(traitList, leaf), "princess")
+          put(makeStartingRaw(traitList, leaf), "drone")
+          putStorage(makeStartingRaw(traitList, leaf), "princess")
+          putStorage(makeStartingRaw(traitList, leaf), "drone")
+        end
+      else
+        put(makeStartingRaw(traitList, "Forest"), "princess")
+        put(makeStartingRaw(traitList, "Meadows"), "drone")
+      end
     elseif s.mode == "species" and s.targetSpecies and not seededSpecies[s.targetSpecies] then
       seededSpecies[s.targetSpecies] = true
       if opts.hard then
@@ -899,15 +955,20 @@ function M.install(config, sites, opts)
           -- parents match a recipe.
           local function makeOffspring()
             local child = crossRaw(world.traitList, a.princessRaw, a.droneRaw)
-            for targetSpecies, recipes in pairs(world.mutationRecipes) do
+            -- DIRECTIONAL mutation roll: the princess-slot species is
+            -- allele1, the drone-slot species is allele2 -- look up that
+            -- exact ordered pair (not the reverse). A conditioned recipe
+            -- only fires if its special conditions are currently met (see
+            -- world.conditionsMet). First matching successful roll wins.
+            local P = a.princessRaw.species.active.name
+            local D = a.droneRaw.species.active.name
+            local recipes = world.mutationPairIndex[P .. "|" .. D]
+            if recipes then
               for _, recipe in ipairs(recipes) do
-                local nameA = a.princessRaw.species.active.name
-                local nameB = a.droneRaw.species.active.name
-                local wantA, wantB = recipe.allele1.name, recipe.allele2.name
-                local matches = (nameA == wantA and nameB == wantB) or (nameA == wantB and nameB == wantA)
-                if matches and math.random(100) <= recipe.chance then
-                  local sp = { name = targetSpecies, uid = "sim." .. targetSpecies:lower(), humidity = "Normal", temperature = "Normal" }
+                if world.conditionsMet(recipe.conditions) and math.random(100) <= recipe.chance then
+                  local sp = { name = recipe.result, uid = "sim." .. recipe.result:lower(), humidity = "Normal", temperature = "Normal" }
                   child.species = { active = sp, inactive = sp }
+                  break
                 end
               end
             end

@@ -28,13 +28,12 @@
       convention). bee_housing.getQueen()/getDrone() return the individual
       itself, UNWRAPPED (no .individual nesting) -- see readIndividual()
       below, which handles both shapes.
-    - bee_housing (getBeeParents, getQueen, getDrone, canBreed, ...) is
-      exposed by ANY apiary block, not a separate dedicated block -- but
-      it's only reachable if OC's normal adjacency-component visibility
-      extends to a moving Agent the same way it does a stationary
-      Computer+Adapter. NOT independently confirmed for a moving host --
-      guarded with pcall and a config-supplied fallback mutation table
-      (see M.lookupMutationParents).
+    - The mutation graph (bee_housing / tile_for_apiculture getBeeBreedingData)
+      is NOT reachable from a moving robot -- only a stationary OC Adapter
+      next to an apiary exposes it (confirmed). So it's dumped ONCE from
+      such a setup, shipped as bee_mutations.dat, and loaded at startup
+      into config.mutationGraph (see M.loadMutationGraph). The mutation
+      mode's tree planning lives in the pure bee_mutation_graph module.
 
   ASSUMED HARDWARE (flag if wrong, easy to adjust):
     - Agent (Robot or Drone) with "beekeeper" AND "inventory_controller"
@@ -79,6 +78,7 @@ local BB = require("bee_breeding")
 local Cfg = require("bee_trait_config")
 local Nav = require("bee_keeper_nav")
 local Status = require("bee_keeper_status")
+local MG = require("bee_mutation_graph")
 
 local M = {}
 M.Nav = Nav
@@ -466,21 +466,24 @@ end
 -- ============================================================
 -- Mutation mode
 -- ============================================================
-
--- Query the live mutation graph for targetSpecies via any apiary's
--- bee_housing component. Falls back to config.mutationFallback[targetSpecies]
--- (same {allele1={name=..},allele2={name=..},chance=N} shape) if
--- bee_housing isn't reachable from a moving agent (unconfirmed -- see
--- header notes).
-function M.lookupMutationParents(config, targetSpecies)
-  local ok, result = pcall(function()
-    return component().bee_housing.getBeeParents(targetSpecies)
-  end)
-  if ok and result then
-    return result
-  end
-  return config.mutationFallback and config.mutationFallback[targetSpecies] or {}
-end
+--
+-- The mutation graph is NOT queried live -- a moving robot has no
+-- bee_housing / tile_for_apiculture component (confirmed; only a
+-- stationary OC Adapter next to an apiary does). Instead the whole GTNH
+-- graph is dumped ONCE from such a setup (scripts/dump_bee_data.lua),
+-- shipped as bee_mutations.dat, loaded at startup, and handed in as
+-- config.mutationGraph (a built graph from bee_mutation_graph.build --
+-- see M.loadMutationGraph / bee_keeper_manager_run.lua). All the tree
+-- reasoning lives in the pure bee_mutation_graph module (MG); this file
+-- only turns its plan into real swapQueen/swapDrone actions.
+--
+-- DIRECTION: a mutation recipe is an ORDERED pair -- allele1 = princess,
+-- allele2 = drone (confirmed). We load the princess-species specimen into
+-- the queen slot and the drone-species specimen into the drone slot, in
+-- that exact order (correct if GTNH enforces direction; still fires if it
+-- doesn't). This is why groupBySpecies keeps princess/drone lists
+-- separate -- a mutation step needs a genuine princess of one named
+-- species and a genuine drone of the other, not just "any two bees".
 
 -- Groups the agent's working-slot bees by species name (Cfg.speciesKey),
 -- keeping SEPARATE princess-capable and drone-capable lists per species.
@@ -528,54 +531,133 @@ local function bestOfSpecies(candidates, traitList)
   return best
 end
 
--- Finds the highest-chance mutation recipe for targetSpecies that's
--- actually satisfiable with species currently in the working slots (one
--- specimen of each required parent species). Returns
--- { princessSlot, droneSlot, chance } or nil if nothing's satisfiable yet
--- (in which case the two required species names are still worth logging).
-function M.planMutation(config, targetSpecies, traitList)
-  local recipes = M.lookupMutationParents(config, targetSpecies)
-  local held = groupBySpecies(config)
-
-  local best, bestChance = nil, -1
-  local missingReport = nil
-
-  for _, recipe in ipairs(recipes) do
-    local nameA = Cfg.speciesKey(recipe.allele1)
-    local nameB = Cfg.speciesKey(recipe.allele2)
-    local groupA = held[nameA]
-    local groupB = held[nameB]
-
-    -- Try both arrangements -- Forestry doesn't care which NAMED species
-    -- ends up as the princess vs the drone, only that one side is a
-    -- genuine princess/queen and the other a genuine drone.
-    local arrangement = nil
-    if groupA and groupB and #groupA.princesses > 0 and #groupB.drones > 0 then
-      arrangement = { princessGroup = groupA.princesses, droneGroup = groupB.drones,
-                       princessSpecies = nameA, droneSpecies = nameB }
-    elseif groupA and groupB and #groupB.princesses > 0 and #groupA.drones > 0 then
-      arrangement = { princessGroup = groupB.princesses, droneGroup = groupA.drones,
-                       princessSpecies = nameB, droneSpecies = nameA }
-    end
-
-    if arrangement then
-      if recipe.chance > bestChance then
-        local princessPick = bestOfSpecies(arrangement.princessGroup, traitList)
-        local dronePick = bestOfSpecies(arrangement.droneGroup, traitList)
-        bestChance = recipe.chance
-        best = { princessSlot = princessPick.slot, droneSlot = dronePick.slot, chance = recipe.chance,
-                 princessSpecies = arrangement.princessSpecies, droneSpecies = arrangement.droneSpecies }
-      end
-    elseif not missingReport then
-      missingReport = string.format("need a princess/queen of '%s' and a drone of '%s' (or vice versa) (%.0f%% base chance)",
-        nameA, nameB, recipe.chance)
+-- The set of species names the agent currently holds as analyzed bees in
+-- its working slots -- the "owned" boundary the tree planner stops at
+-- (already-bred intermediates don't need re-breeding). Any specimen of a
+-- species (princess OR drone) counts as owning it, since a mutation graph
+-- only cares whether the species is on hand at all.
+function M.ownedSpecies(config)
+  local owned = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local individual = M.readOwnSlot(slot)
+    if individual and individual.active and individual.active.species then
+      owned[Cfg.speciesKey(individual.active.species)] = true
     end
   end
-
-  return best, missingReport
+  return owned
 end
 
--- Runs one decision+action cycle for a "mutation" site.
+-- Plans the NEXT actionable mutation step toward targetSpecies, given
+-- what's currently in cargo. Delegates the whole tree search to the pure
+-- bee_mutation_graph module (min-cost AND-OR fixpoint over the real GTNH
+-- graph), then resolves the FIRST step of the returned topological plan
+-- to concrete cargo slots.
+--
+-- Why the first step is always the right one to act on: MG.traverseTree
+-- emits steps post-order and stops at owned species, so steps[1]'s two
+-- parents are each either already owned or a missing base leaf -- nothing
+-- earlier needs breeding first. As each intermediate gets bred and shows
+-- up in cargo, ownedSpecies grows and the plan naturally advances to the
+-- next step on a later visit (the tree is re-planned every cycle from
+-- live cargo, so it self-corrects if a bee is lost).
+--
+-- Returns (step, nil) on success, where step is
+--   { princessSlot, droneSlot, princessSpecies, droneSpecies, chance,
+--     conditions, subTarget, missingLeaves }
+-- or (nil, reportString) when nothing's actionable yet -- the report
+-- names exactly what's missing (a role of a held species, or which base
+-- leaf bees the user still has to go gather).
+function M.planMutationStep(config, targetSpecies, traitList)
+  local graph = config.mutationGraph
+  if not graph then return nil, "no_mutation_graph_loaded" end
+
+  local owned = M.ownedSpecies(config)
+  local plan = MG.planBreedingTree(graph, owned, targetSpecies)
+  if plan.alreadyOwned then return nil, "already_have_target" end
+  if not plan.reachable then
+    local report = "target '" .. tostring(targetSpecies) .. "' is unreachable from the known mutation graph"
+    return nil, report
+  end
+  if #plan.steps == 0 then return nil, "no_actionable_step" end
+
+  -- DIRECTIONAL: the step names which species must be the princess
+  -- (allele1) and which the drone (allele2). Require a genuine
+  -- princess/queen item of the former and a genuine drone item of the
+  -- latter -- do NOT fall back to the reverse arrangement (direction may
+  -- matter for triggering the mutation; the data's order is the safe one).
+  local step = plan.steps[1]
+  local held = groupBySpecies(config)
+  local pGroup = held[step.princess]
+  local dGroup = held[step.drone]
+  local princessOk = pGroup and #pGroup.princesses > 0
+  local droneOk = dGroup and #dGroup.drones > 0
+
+  if not princessOk or not droneOk then
+    local needs = {}
+    if not princessOk then table.insert(needs, string.format("a princess/queen of '%s'", step.princess)) end
+    if not droneOk then table.insert(needs, string.format("a drone of '%s'", step.drone)) end
+    local report = string.format("to breed '%s' need %s", step.result, table.concat(needs, " and "))
+    if plan.missingLeaves and #plan.missingLeaves > 0 then
+      report = report .. "; missing base leaf bees to gather: " .. table.concat(plan.missingLeaves, ", ")
+    end
+    return nil, report
+  end
+
+  local princessPick = bestOfSpecies(pGroup.princesses, traitList)
+  local dronePick = bestOfSpecies(dGroup.drones, traitList)
+  return {
+    princessSlot = princessPick.slot,
+    droneSlot = dronePick.slot,
+    princessSpecies = step.princess,
+    droneSpecies = step.drone,
+    chance = step.chance,
+    conditions = step.conditions or {},
+    subTarget = step.result,
+    missingLeaves = plan.missingLeaves,
+  }, nil
+end
+
+-- Two rising beeps -- the audible cue for the special-condition gate
+-- (see M.gateSpecialConditions). Guarded: a host without a beep-capable
+-- computer just no-ops instead of erroring.
+function M.beepAlert()
+  pcall(function()
+    local computer = require("computer")
+    if computer.beep then
+      computer.beep(1000, 0.2)
+      computer.beep(1400, 0.2)
+    end
+  end)
+end
+
+-- Gate before a mutation step whose recipe carries special conditions the
+-- robot can't provide itself (a foundation block, a biome/dimension, a
+-- climate, a time window -- see bee_mutation_graph's condition classes).
+-- Returns true when the step may proceed, false to defer it this cycle.
+--
+-- config.confirmCondition(conditions, subTarget) -> bool overrides the
+-- behavior entirely (the simulator and headless tests inject one so a
+-- multi-step tree with N confirmations runs instantly). With no override,
+-- the real-hardware default beeps, prints the exact requirement strings,
+-- and blocks on computer.pullSignal() until the user has set it up and
+-- pokes the robot (any key/interrupt), then proceeds.
+function M.gateSpecialConditions(config, conditions, subTarget)
+  if not conditions or #conditions == 0 then return true end
+  if config.confirmCondition then
+    return config.confirmCondition(conditions, subTarget) and true or false
+  end
+  M.beepAlert()
+  print(string.format("[special condition] Breeding '%s' needs manual setup:", tostring(subTarget)))
+  for _, c in ipairs(conditions) do print("   - " .. tostring(c)) end
+  print("   Set it up, then press any key / poke the robot to continue...")
+  pcall(function() require("computer").pullSignal() end)
+  return true
+end
+
+-- Runs one decision+action cycle for a "mutation" site. Executes an
+-- ordered breeding TREE toward site.targetSpecies: each visit plans (via
+-- M.planMutationStep) and acts on the next actionable step, advancing
+-- through intermediates automatically as they get bred and harvested.
 function M.runMutationSite(config, site)
   Status.setStep("Heading to " .. (site.name or "?") .. " (mutation)")
   local ok, reason = gotoSite(site)
@@ -611,33 +693,46 @@ function M.runMutationSite(config, site)
     site.progress = M.purityOf(mutationTraits, sittingBee.genotype)
   end
 
-  -- Once a mutation succeeds, some harvested offspring will be
-  -- targetSpecies -- check the working slots for one before planning
-  -- another attempt, so a lucky success isn't immediately overwritten.
-  local traitList = mutationTraits
+  -- Once the FINAL target shows up in a harvest, hand off -- the site is
+  -- expected to switch to "species" mode to purify it from here (see the
+  -- header's mode notes). Checked before planning another attempt so a
+  -- lucky success isn't immediately overwritten. Intermediates are NOT
+  -- handed off here: they're just another owned species the plan below
+  -- keeps building on toward the real target.
   for _, slot in ipairs(config.workingSlots) do
     local individual = M.readOwnSlot(slot)
-    if individual and Cfg.speciesKey(individual.active.species) == site.targetSpecies then
+    if individual and individual.active and Cfg.speciesKey(individual.active.species) == site.targetSpecies then
       return "mutation_succeeded:switch_site_to_species_mode"
     end
   end
 
-  local plan, missingReport = M.planMutation(config, site.targetSpecies, traitList)
-  if not plan then
-    return "waiting_on_parent_species:" .. (missingReport or "no_known_recipe")
+  local step, report = M.planMutationStep(config, site.targetSpecies, mutationTraits)
+  if not step then
+    return "waiting_on_parent_species:" .. (report or "no_known_recipe")
   end
 
-  Status.setStep(string.format("Attempting mutation at %s: %s x %s",
-    site.name or "?", plan.princessSpecies, plan.droneSpecies))
-  agent().select(plan.princessSlot)
+  -- Special-condition gate: some steps need a foundation block / biome /
+  -- dimension / climate / time the robot can't provide. Beep + await the
+  -- user (or the injected confirmer) before committing the pair.
+  if step.conditions and #step.conditions > 0 then
+    if not M.gateSpecialConditions(config, step.conditions, step.subTarget) then
+      return "awaiting_special_condition:" .. table.concat(step.conditions, "; ")
+    end
+  end
+
+  local towardNote = (step.subTarget ~= site.targetSpecies)
+    and (" toward " .. tostring(step.subTarget)) or ""
+  Status.setStep(string.format("Attempting mutation at %s: %s x %s%s",
+    site.name or "?", step.princessSpecies, step.droneSpecies, towardNote))
+  agent().select(step.princessSlot)
   if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
-  local droneSlot = ensureSingleItemSlot(config, plan.droneSlot)
+  local droneSlot = ensureSingleItemSlot(config, step.droneSlot)
   if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
   agent().select(droneSlot)
   if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
 
-  return string.format("attempting mutation %s x %s (%.0f%% base chance)",
-    plan.princessSpecies, plan.droneSpecies, plan.chance)
+  return string.format("attempting mutation %s x %s%s (%.0f%% base chance)",
+    step.princessSpecies, step.droneSpecies, towardNote, step.chance)
 end
 
 -- ============================================================
@@ -1219,6 +1314,29 @@ function M.loadSites(savedSites, siteOverrides)
     })
   end
   return sites
+end
+
+-- ============================================================
+-- Mutation graph loading: reads the committed bee_mutations.dat (the
+-- one-time GTNH dump -- see scripts/dump_bee_data.lua / docs/oc_forestry_api.md)
+-- and builds it into the indexed graph the tree planner consumes, storing
+-- it on config.mutationGraph. Only needed if any site runs in "mutation"
+-- mode; a missing/unreadable file is non-fatal (mutation sites then just
+-- report "no_mutation_graph_loaded" instead of crashing). Called once at
+-- startup from bee_keeper_manager_run.lua.
+-- ============================================================
+
+function M.loadMutationGraph(config, path)
+  path = path or "bee_mutations.dat"
+  local f = io.open(path, "r")
+  if not f then return nil, "not_found:" .. path end
+  local serialized = f:read("*a")
+  f:close()
+  if not serialized or serialized == "" then return nil, "empty:" .. path end
+  local ok, graph = pcall(MG.parse, serialized)
+  if not ok or not graph then return nil, "parse_failed:" .. tostring(graph) end
+  config.mutationGraph = graph
+  return graph
 end
 
 -- ============================================================

@@ -87,7 +87,7 @@ press Enter to keep it, or type `rescan` to redo the area scan.
 | `apiaryBlockNames` / `storageBlockNames` | Block names (`geolyzer.analyze(down).name`) the area scan matches against. See Troubleshooting for how to verify these. |
 | `showBorderPreview` | Whether setup walks the 4 corners before scanning. |
 | `needCharge` / `chargeThreshold` / `chargerPos` | Auto-return-to-charge behavior. |
-| `mutationFallback` | Optional static mutation-recipe table, used only if the live `bee_housing` lookup isn't reachable. |
+| `mutationGraph` | The GTNH mutation graph for `mutation`-mode tree planning. Loaded automatically at startup from the committed `bee_mutations.dat` dump — leave unset. (`mutationFallback` is deprecated/unused.) |
 | `siteOverrides` | Per-site mode/target assignment (see above). |
 | `storagePos`, `sites` | Filled in automatically from the area scan — leave `nil`. |
 
@@ -97,11 +97,18 @@ press Enter to keep it, or type `rescan` to redo the area scan.
   max-trait as possible from whatever's on hand.
 - **species** — you already hold at least one specimen of `targetSpecies`;
   purify toward pure-species + max traits simultaneously.
-- **mutation** — you don't yet hold `targetSpecies`; looks up its mutation
-  recipe, loads the best satisfiable parent pair, and keeps re-attempting
-  (mutation is probabilistic per mating in Forestry). Once a specimen of
-  `targetSpecies` shows up in the harvest, switch the site to `species`
-  mode to take over from there.
+- **mutation** — you don't yet hold `targetSpecies`. The robot plans a
+  full **breeding tree** over the real GTNH mutation graph
+  (`bee_mutations.dat`): it breeds any intermediate species first, then
+  combines them toward the target, advancing autonomously as each
+  intermediate appears. Pairs are loaded **directionally** (recipe
+  allele1 → princess slot, allele2 → drone slot). If a step needs a
+  **special condition** the robot can't provide (a foundation block,
+  biome, dimension, climate, or time window), it **beeps and waits** for
+  you to set it up, then continues. Base "leaf" bees the tree needs but
+  you don't own are reported by name so you know what to go gather. Once a
+  specimen of `targetSpecies` shows up in the harvest, switch the site to
+  `species` mode to take over from there.
 
 ## Updating
 

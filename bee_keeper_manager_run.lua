@@ -110,6 +110,26 @@ local function main(args)
   config.trashPos = config.trashPos or saved.trashPos
   config.workingSlots = M.resolveWorkingSlots(config)
 
+  -- Load the GTNH mutation graph (bee_mutations.dat) for any "mutation"
+  -- site's tree planner. Only bother if something actually needs it, and
+  -- treat a missing/unreadable dump as non-fatal -- mutation sites will
+  -- just report they have no graph rather than crashing the whole run.
+  local needsGraph = false
+  for _, s in ipairs(config.sites) do
+    if s.mode == "mutation" then needsGraph = true end
+  end
+  if needsGraph then
+    local graph, err = M.loadMutationGraph(config)
+    if graph then
+      local n = 0
+      for _ in pairs(graph.byResult) do n = n + 1 end
+      print(string.format("Loaded mutation graph: %d producible species.", n))
+    else
+      print("WARNING: could not load bee_mutations.dat (" .. tostring(err) ..
+        ") -- mutation sites cannot plan breeding trees until it's present.")
+    end
+  end
+
   if uiEnabled then
     local UI = require("bee_keeper_ui")
     local computer = require("computer")
