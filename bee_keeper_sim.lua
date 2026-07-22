@@ -169,6 +169,7 @@ local function crossRaw(traitList, parentA, parentB)
     end
     child[trait] = { active = a, inactive = b }
   end
+  child._natural = false -- bred offspring are IGNOBLE (only wild stock is pristine)
   return child
 end
 
@@ -266,12 +267,18 @@ end
 local function toIndividual(rawGenotype, isAnalyzed)
   local active, inactive = {}, {}
   for trait, alleles in pairs(rawGenotype) do
-    if trait ~= "_uid" then
+    if trait ~= "_uid" and trait ~= "_natural" then
       active[trait] = alleles.active
       inactive[trait] = alleles.inactive
     end
   end
-  return { active = active, inactive = inactive, isAnalyzed = isAnalyzed ~= false }
+  -- isNatural = pristine (true) vs ignoble (false), matching the real OC
+  -- genome field. Seeded starting stock is pristine (wild-scooped); anything
+  -- BRED (crossRaw marks child._natural=false) is ignoble. Defaults true when
+  -- unmarked so nothing is ever mistakenly treated as ignoble/junkable.
+  local isNatural = rawGenotype._natural
+  if isNatural == nil then isNatural = true end
+  return { active = active, inactive = inactive, isAnalyzed = isAnalyzed ~= false, isNatural = isNatural }
 end
 -- Verbose-mode debugging aid: a stable, unique ID per actual individual
 -- bee (not per stack-merge, not re-assigned every time the SAME bee is
@@ -315,7 +322,7 @@ end
 -- one), is threaded through so the same bee keeps the same id across the
 -- cargo<->apiary round trip instead of minting a new one.
 local function rawFromIndividual(individual, uid)
-  local g = { _uid = uid }
+  local g = { _uid = uid, _natural = individual.isNatural }
   for trait, activeValue in pairs(individual.active) do
     g[trait] = { active = activeValue, inactive = individual.inactive[trait] }
   end

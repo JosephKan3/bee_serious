@@ -137,7 +137,12 @@ end
 config.storagePos = config.storagePos or { x = -6, z = -6 }
 config.trashPos = config.trashPos or { x = -8, z = -8 }
 config.chargerPos = config.chargerPos or { x = 0, z = 0 }
-config.workingSlots = config.workingSlots or { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }
+-- Genebank runs model a bigger robot (32 slots) so banks for several species fit
+-- in cargo at once; other modes keep the smaller default.
+if not config.workingSlots then
+  config.workingSlots = {}
+  for s = 2, (genebankMode and 32 or 16) do table.insert(config.workingSlots, s) end
+end
 
 -- Genebank runs model mutation-boosting frames (see sim mutationBoost) so a
 -- purebred x purebred cross reliably mutates instead of burning many base
@@ -148,7 +153,8 @@ Sim.install(config, config.sites, {
   mutationGraph = mutationGraph,
   mutationLeaves = mutationLeaves,
   mutationBoost = genebankMode and 6 or 1,
-  storageSize = genebankMode and 160 or nil,
+  cargoSize = genebankMode and 32 or nil,        -- a 32-slot robot
+  storageSize = genebankMode and 108 or nil,     -- an etfuturum diamond barrel
 })
 
 local M = require("bee_keeper_manager")

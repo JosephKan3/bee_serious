@@ -630,7 +630,32 @@ function M.planMutationStep(config, targetSpecies, traitList)
   local step = plan.steps[1]
   local held = groupBySpecies(config)
 
+  -- Satisfiability of a recipe from current stock. In GENEBANK mode this must
+  -- agree with ownedSpecies and the reserve gate, or the planner proposes a step
+  -- the gate then refuses (a "building_intermediate" limbo that breeds nothing):
+  --   * princess parent must have a SPENDABLE surplus purebred princess (a
+  --     producible intermediate keeps >=minPrincesses in reserve; a base species
+  --     with its pristine supply just needs >=1);
+  --   * drone parent must have purebred drones to spend now, OR a purebred
+  --     princess+drone the gate can grow the bank from (M.maintainBankAt).
+  -- Without genebank it's the old "any princess + any drone" check.
+  local gbSummary = config.genebank and M.genebankScan(config) or nil
+  local gbProducible = (graph.producible) or {}
+  local function princessSpendable(sp)
+    local s = gbSummary[sp] or {}
+    local reserve = gbProducible[sp] and GB.minPrincesses(config.genebank) or 0
+    return (s.purePrincesses or 0) > reserve
+  end
+  local function droneAvailable(sp)
+    local s = gbSummary[sp] or {}
+    local reserve = gbProducible[sp] and GB.minDrones(config.genebank) or 0
+    return (s.pureDrones or 0) > reserve
+      or ((s.purePrincesses or 0) >= 1 and (s.pureDrones or 0) >= 1)
+  end
   local function satisfiable(r)
+    if config.genebank then
+      return princessSpendable(r.princess) and droneAvailable(r.drone)
+    end
     local pg, dg = held[r.princess], held[r.drone]
     return pg and #pg.princesses > 0 and dg and #dg.drones > 0
   end
@@ -797,21 +822,25 @@ function M.maintainBankAt(config, site, species)
   return "maintaining " .. species
 end
 
--- Junk every HYBRID (non-purebred) bee in cargo -- send it to trash (or storage
--- if no trash). In the purebred-bank strategy a hybrid is never useful: breeding
--- one drifts the species, so per the wiki they go straight to the junk chest.
--- keepSpecies (optional) is spared -- e.g. the site's target, so a first hybrid
--- specimen of it survives for the species-mode handoff.
-function M.junkHybrids(config, site, keepSpecies)
+-- Junk the useless hybrid (non-purebred) byproducts of mutation crosses so they
+-- don't pile up and crowd the banks out of cargo. What's junked:
+--   * every hybrid DRONE (pure fodder -- breeding it drifts a bank), and
+--   * IGNOBLE hybrid princesses (isNatural == false) -- bred princesses that
+--     degrade and would otherwise accumulate forever.
+-- What is NEVER junked: PRISTINE princesses (isNatural ~= false) -- scarce,
+-- renewable breeding stock the whole program depends on -- and all purebred
+-- bees (the banks). Purebred bees and pristine princesses always survive.
+function M.junkHybrids(config, site)
   local entries = {}
   for _, slot in ipairs(config.workingSlots) do
     local stack = invCtrl().getStackInInternalSlot(slot)
     local ind = readIndividual(stack)
     if ind and ind.active and ind.active.species
-      and (isPrincessOrQueenStack(stack) or isDroneStack(stack)) then
+      and (isDroneStack(stack) or isPrincessOrQueenStack(stack)) then
       local species = Cfg.speciesKey(ind.active.species)
-      if species ~= keepSpecies and not M.isSpeciesPurebred(ind, species) then
-        table.insert(entries, { drone = { id = "hybrid:" .. slot, _slot = slot } })
+      if not M.isSpeciesPurebred(ind, species) then
+        local junk = isDroneStack(stack) or (ind.isNatural == false)
+        if junk then table.insert(entries, { drone = { id = "hybrid:" .. slot, _slot = slot } }) end
       end
     end
   end
@@ -878,7 +907,7 @@ function M.runMutationSite(config, site)
   -- the reserve math. Spare the target species so a first hybrid specimen of it
   -- survives for the species-mode handoff.
   if config.genebank then
-    M.junkHybrids(config, site, site.targetSpecies)
+    M.junkHybrids(config, site)
     -- back at the site after the trash trip
     if not gotoSite(site) then return "nav_failed_after_junk" end
   end
