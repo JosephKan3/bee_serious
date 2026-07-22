@@ -670,7 +670,7 @@ function M.newWorld(config, sites, opts)
         -- princesses), so only a handful of base princesses are needed per leaf
         -- even for a deep tree. A few more sit in storage as a restock backup.
         local LEAF_CARGO_PRINCESSES = 8
-        local LEAF_STORE_PRINCESSES = 8
+        local LEAF_STORE_PRINCESSES = 60
         for _, leaf in ipairs(leaves) do
           for _ = 1, LEAF_CARGO_PRINCESSES do
             put(makeStartingRaw(traitList, leaf), "princess")

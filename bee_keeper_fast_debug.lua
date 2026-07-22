@@ -152,9 +152,9 @@ Sim.install(config, config.sites, {
   hard = hardMode,
   mutationGraph = mutationGraph,
   mutationLeaves = mutationLeaves,
-  mutationBoost = genebankMode and 6 or 1,
+  mutationBoost = genebankMode and 4 or 1,
   cargoSize = genebankMode and 32 or nil,        -- a 32-slot robot
-  storageSize = genebankMode and 108 or nil,     -- an etfuturum diamond barrel
+  storageSize = genebankMode and 512 or nil,     -- a large storage bank
 })
 
 local M = require("bee_keeper_manager")
