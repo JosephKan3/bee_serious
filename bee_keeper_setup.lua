@@ -147,6 +147,16 @@ end
 -- Border preview
 -- ============================================================
 
+-- Both the ASCII label below and flyBorderPreview's corners describe the
+-- LAST CELL sweepCells(width, depth) actually visits, i.e. (width-1,
+-- depth-1) -- sweepCells iterates x=0..width-1, z=0..depth-1 (a WxD
+-- grid, 0-indexed), so the far corner is one block SHORT of (width,
+-- depth). Using (width, depth) directly here showed the boundary a
+-- full block past where the real scan ever reaches -- confirmed as a
+-- real, reported bug: block placement based on this preview could sit
+-- just outside the area actually swept, never getting discovered at
+-- all (e.g. a storage container placed at the previewed-but-not-
+-- actually-scanned far corner).
 local function printAsciiPreview(width, depth)
   print(string.format("Planned scan area: %d x %d (starting at the drone's current position, (0,0)):", width, depth))
   local maxCols = 40
@@ -159,7 +169,7 @@ local function printAsciiPreview(width, depth)
   for _ = 1, rows do
     print("       |" .. string.rep(" ", cols) .. "|")
   end
-  print("       +" .. string.rep("-", cols) .. string.format("+ (%d,%d)", width, depth))
+  print("       +" .. string.rep("-", cols) .. string.format("+ (%d,%d)", width - 1, depth - 1))
 end
 
 -- Walks to all 4 corners of the planned area (relative to current
@@ -167,9 +177,12 @@ end
 -- Lets you visually confirm the boundary in-world before committing to
 -- the full sweep. Signal is a light flash (component.drone) if that
 -- component exists, or a beep (component.computer, on any host
--- including a Robot) otherwise -- checked once, not per corner.
+-- including a Robot) otherwise -- checked once, not per corner. Corners
+-- use width-1/depth-1 (the actual last scanned cell -- see
+-- printAsciiPreview's header notes), not width/depth directly.
 local function flyBorderPreview(width, depth)
-  local corners = { { 0, 0 }, { width, 0 }, { width, depth }, { 0, depth }, { 0, 0 } }
+  local maxX, maxZ = width - 1, depth - 1
+  local corners = { { 0, 0 }, { maxX, 0 }, { maxX, maxZ }, { 0, maxZ }, { 0, 0 } }
 
   local d = component().isAvailable("drone") and component().drone or nil
   local originalColor = d and d.getLightColor()
@@ -197,6 +210,7 @@ local function flyBorderPreview(width, depth)
   end
   if d then d.setLightColor(originalColor) end
 end
+M.flyBorderPreview = flyBorderPreview
 
 -- ============================================================
 -- Area sweep

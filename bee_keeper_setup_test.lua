@@ -17,9 +17,9 @@ package.loaded["component"] = {
       return { name = blocksByCell[key] or "minecraft:air" }
     end,
   },
-  -- No robot/drone/computer registered -- these tests only exercise
-  -- scanArea directly, never M.run/flyBorderPreview, so isAvailable is
-  -- never consulted.
+  -- No robot/drone/computer registered -- isAvailable always false, so
+  -- flyBorderPreview's light-flash/beep signaling never fires (both
+  -- branches guarded by isAvailable checks), only its actual navigation.
   isAvailable = function() return false end,
 }
 
@@ -113,6 +113,40 @@ do
   end
   check("column 0 sweeps ascending", col0[1] == 0 and col0[4] == 3, table.concat(col0, ","))
   check("column 1 sweeps descending (zigzag, not reset)", col1[1] == 3 and col1[4] == 0, table.concat(col1, ","))
+end
+
+-- ============================================================
+-- Test: flyBorderPreview's far corner must match the LAST cell
+-- sweepCells actually visits (width-1, depth-1), not (width, depth).
+-- sweepCells iterates x=0..width-1, z=0..depth-1 (a 0-indexed WxD grid),
+-- so (width, depth) is a full block PAST anything the real scan ever
+-- reaches -- reported as a real bug: block placement based on the
+-- preview's boundary could sit just outside the area actually swept,
+-- never getting discovered by scanArea at all.
+-- ============================================================
+
+do
+  visitedCells = {}
+  blocksByCell = {}
+
+  Setup.flyBorderPreview(5, 3) -- 5 wide (x), 3 deep (z)
+
+  local farCorner = nil
+  for _, cell in ipairs(visitedCells) do
+    if cell[1] == 4 and cell[2] == 2 then farCorner = cell end
+  end
+  check("flyBorderPreview visits the actual far corner (4,2), matching sweepCells' last cell",
+    farCorner ~= nil, "visited=" .. table.concat((function()
+      local s = {}
+      for _, c in ipairs(visitedCells) do table.insert(s, "(" .. c[1] .. "," .. c[2] .. ")") end
+      return s
+    end)(), ","))
+
+  local overshoot = false
+  for _, cell in ipairs(visitedCells) do
+    if cell[1] >= 5 or cell[2] >= 3 then overshoot = true end
+  end
+  check("flyBorderPreview never visits a cell past what sweepCells(5,3) actually covers", not overshoot)
 end
 
 print("")
