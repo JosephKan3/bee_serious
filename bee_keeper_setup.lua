@@ -90,23 +90,54 @@ end
 -- old Transposer-based script and isn't confirmed correct for every
 -- apiary tier/mod version; harvestSite silently pulling nothing is
 -- exactly the symptom of that range being wrong for a given real apiary.
+-- Console output is a GROUPED summary (one line per distinct
+-- name/label/size combination, listing which slots share it) instead
+-- of one line per individual slot -- a container mostly full of
+-- identical stacks (the common case: a barrel full of honey, or an
+-- apiary's output slots full of the same drone) otherwise overflows a
+-- small in-game terminal with 20+ near-duplicate lines and no way to
+-- scroll back. The FULL per-slot detail (every slot, empty or not)
+-- always goes to inventory_probe.log regardless -- this project already
+-- mirrors the OC filesystem to your real disk (same as every other log
+-- this whole debugging session has read), so that file is readable in
+-- any normal text editor with no console scrollback limit at all.
 function M.probeInventoryBelow()
   local ic = component().inventory_controller
   local down = sides().down
   local size = ic.getInventorySize(down)
 
   local lines = { string.format("inventory_controller.getInventorySize(down) = %s", tostring(size)) }
+  local groups, groupOrder, emptyCount = {}, {}, 0
+
   for slot = 1, (size or 0) do
     local stack = ic.getStackInSlot(down, slot)
     if stack then
       table.insert(lines, string.format("  slot %d: %s x%s (%s)",
         slot, tostring(stack.name), tostring(stack.size), tostring(stack.label)))
+      local key = tostring(stack.name) .. "|" .. tostring(stack.label) .. "|" .. tostring(stack.size)
+      if not groups[key] then
+        groups[key] = { name = stack.name, label = stack.label, size = stack.size, slots = {} }
+        table.insert(groupOrder, key)
+      end
+      table.insert(groups[key].slots, slot)
     else
       table.insert(lines, string.format("  slot %d: empty", slot))
+      emptyCount = emptyCount + 1
     end
   end
 
-  for _, line in ipairs(lines) do print(line) end
+  print(string.format("inventory_controller.getInventorySize(down) = %s", tostring(size)))
+  for _, key in ipairs(groupOrder) do
+    local g = groups[key]
+    local slotDesc = #g.slots <= 4
+      and ("slot" .. (#g.slots > 1 and "s " or " ") .. table.concat(g.slots, ","))
+      or string.format("%d slots (e.g. %d,%d,%d,...)", #g.slots, g.slots[1], g.slots[2], g.slots[3])
+    print(string.format("  %s: %s x%s (%s)", slotDesc, tostring(g.name), tostring(g.size), tostring(g.label)))
+  end
+  if emptyCount > 0 then
+    print(string.format("  %d slot(s) empty", emptyCount))
+  end
+  print(string.format("Full per-slot detail (%d lines) written to inventory_probe.log -- open that in a text editor for the exhaustive version.", #lines))
 
   local f = io.open("inventory_probe.log", "w")
   if f then
