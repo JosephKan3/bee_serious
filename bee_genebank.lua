@@ -34,8 +34,24 @@ local M = {}
 -- Reserve floor. "Pure" throughout means species-homozygous (the species locus
 -- is GG for that species) -- quality-trait purity ("perfect" bees) is a later
 -- concern layered on top, not part of the loss-prevention reserve.
+--
+-- Two drone thresholds, deliberately distinct:
+--   minDrones (8)      -- the MAINTENANCE target: a healthy, "secure" reserve of
+--                         a species, and the floor a spare DRONE (allele2 parent)
+--                         is only spent above. Steady state converges here.
+--   recoveryDrones (2) -- the loss-prevention floor for spending a species'
+--                         PRINCESS (allele1 parent, which a mutation must
+--                         consume). After the cross the princess line drifts and
+--                         is re-purified against these drones; you just need
+--                         enough to recover, NOT the full reserve -- otherwise a
+--                         freshly-mutated intermediate (which starts with ~1
+--                         drone) could never be used to build the next step, and
+--                         a multi-step tree stalls. So a princess may be spent as
+--                         soon as recovery is possible; the fuller reserve fills
+--                         in over time as the species is bred up.
 M.DEFAULT_MIN_PRINCESSES = 1
 M.DEFAULT_MIN_DRONES = 8
+M.DEFAULT_RECOVERY_DRONES = 2
 
 local function opt(opts, key, default)
   local v = opts and opts[key]
@@ -45,17 +61,22 @@ end
 
 function M.minPrincesses(opts) return opt(opts, "minPrincesses", M.DEFAULT_MIN_PRINCESSES) end
 function M.minDrones(opts) return opt(opts, "minDrones", M.DEFAULT_MIN_DRONES) end
+function M.recoveryDrones(opts) return opt(opts, "recoveryDrones", M.DEFAULT_RECOVERY_DRONES) end
 
 -- ============================================================
 -- Summarize a holdings snapshot
 -- ============================================================
 
--- entries: array of { species=<string>, role="princess"|"drone", speciesPure=<bool> }
+-- entries: array of { species=<string>, role="princess"|"drone", speciesPure=<bool>, count=<number?> }
 --   role       -- from the item type (princess/queen vs drone).
 --   speciesPure -- species locus homozygous for `species` (BB.isPurebred over
 --                  just the species trait). Only pure specimens count toward the
 --                  reserve; impure ones are drift/work-in-progress, tracked
 --                  separately so the caller can see there's material to purify.
+--   count      -- how many bees this entry stands for (a stacked slot holds many
+--                  identical drones). Defaults to 1. This is why the reserve is a
+--                  real quantity, not a slot count -- an 8-drone reserve means 8
+--                  actual drones, however they're stacked.
 -- Returns: { [species] = { princesses, drones, purePrincesses, pureDrones,
 --                          impurePrincesses, impureDrones } }
 function M.summarize(entries)
@@ -72,14 +93,15 @@ function M.summarize(entries)
   for _, e in ipairs(entries or {}) do
     if e.species and e.role then
       local s = rec(e.species)
+      local c = e.count or 1
       if e.role == "princess" then
-        s.princesses = s.princesses + 1
-        if e.speciesPure then s.purePrincesses = s.purePrincesses + 1
-        else s.impurePrincesses = s.impurePrincesses + 1 end
+        s.princesses = s.princesses + c
+        if e.speciesPure then s.purePrincesses = s.purePrincesses + c
+        else s.impurePrincesses = s.impurePrincesses + c end
       elseif e.role == "drone" then
-        s.drones = s.drones + 1
-        if e.speciesPure then s.pureDrones = s.pureDrones + 1
-        else s.impureDrones = s.impureDrones + 1 end
+        s.drones = s.drones + c
+        if e.speciesPure then s.pureDrones = s.pureDrones + c
+        else s.impureDrones = s.impureDrones + c end
       end
     end
   end
@@ -112,12 +134,14 @@ function M.canSpendDrone(summary, species, opts)
 end
 
 -- May a pure PRINCESS of this species be spent (as a mutation's allele1 parent)
--- right now? Allowed to draw the line down to zero, but ONLY while the drone
--- reservoir is intact (>= minDrones) so the species can be re-purified from it
--- afterward -- that intact reservoir is exactly what prevents permanent loss.
+-- right now? Allowed to draw the line down to zero, but ONLY while there are
+-- enough pure drones to re-purify the drifted replacement afterward
+-- (>= recoveryDrones). That recovery capacity is what prevents permanent loss;
+-- it is intentionally the SMALL floor, not the full maintenance reserve, so a
+-- freshly-bred intermediate can be used as soon as it can be recovered.
 function M.canSpendPrincess(summary, species, opts)
   local s = M.statusOf(summary, species)
-  return s.purePrincesses >= 1 and s.pureDrones >= M.minDrones(opts)
+  return s.purePrincesses >= 1 and s.pureDrones >= M.recoveryDrones(opts)
 end
 
 -- How far below the reserve floor a species sits (0/0 when secure). Drives the

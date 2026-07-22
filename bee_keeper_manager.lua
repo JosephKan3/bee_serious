@@ -79,6 +79,7 @@ local Cfg = require("bee_trait_config")
 local Nav = require("bee_keeper_nav")
 local Status = require("bee_keeper_status")
 local MG = require("bee_mutation_graph")
+local GB = require("bee_genebank")
 
 local M = {}
 M.Nav = Nav
@@ -558,6 +559,25 @@ function M.ownedSpecies(config)
       end
     end
   end
+
+  -- In genebank mode, tighten the boundary for PRODUCIBLE species: an
+  -- intermediate only counts as a usable boundary once its bank can actually
+  -- hand over a princess (canSpendPrincess -- pure princess + recovery drones).
+  -- If the bank is too thin, we WANT the planner to keep mutating more of that
+  -- intermediate (a mutation yields pure specimens), rather than declaring it
+  -- "owned" and then deadlocking downstream because there aren't enough drones
+  -- to spend its princess. LEAVES are left as-is: they can't be mutated into,
+  -- so they must count as owned when held (the genebank gate maintains them by
+  -- same-species purification instead).
+  if config.genebank and config.mutationGraph then
+    local summary = M.genebankScan(config)
+    local producible = config.mutationGraph.producible or {}
+    for species in pairs(owned) do
+      if producible[species] and not GB.canSpendPrincess(summary, species, config.genebank) then
+        owned[species] = nil
+      end
+    end
+  end
   return owned
 end
 
@@ -699,6 +719,100 @@ function M.gateSpecialConditions(config, conditions, subTarget)
   return true
 end
 
+-- ============================================================
+-- Genebank: per-species purebred reserves (see bee_genebank.lua). Opt-in via
+-- config.genebank (a settings table, e.g. { minPrincesses=1, minDrones=8 }).
+-- When absent, mutation mode behaves exactly as before (no reserve gating).
+-- ============================================================
+
+-- Is this individual homozygous (GG) for `species` on the species locus? The
+-- "purebred" test the reserve counts on (quality-trait purity is separate).
+function M.isSpeciesPurebred(individual, species)
+  if not (individual and individual.active and individual.inactive) then return false end
+  local g = Cfg.normalizeGenotype({ "species" }, individual.active, individual.inactive, species)
+  return BB.traitState(g, "species") == "GG"
+end
+
+-- Scans cargo into (a) a bee_genebank summary and (b) an index of slots by
+-- species/role/purity so the caller can actually pick a pure specimen to load.
+-- index[species] = { purePrincess={slots}, impurePrincess={}, pureDrone={}, impureDrone={} }
+function M.genebankScan(config)
+  local entries, index = {}, {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind and ind.active and ind.active.species then
+      local role = isPrincessOrQueenStack(stack) and "princess"
+        or (isDroneStack(stack) and "drone" or nil)
+      if role then
+        local species = Cfg.speciesKey(ind.active.species)
+        local pure = M.isSpeciesPurebred(ind, species)
+        -- A stacked drone slot stands for many drones -- count the whole stack,
+        -- so the reserve is a real quantity, not a slot count.
+        table.insert(entries, { species = species, role = role, speciesPure = pure, count = stack.size or 1 })
+        index[species] = index[species]
+          or { purePrincess = {}, impurePrincess = {}, pureDrone = {}, impureDrone = {} }
+        local bucket = (role == "princess")
+          and (pure and "purePrincess" or "impurePrincess")
+          or (pure and "pureDrone" or "impureDrone")
+        table.insert(index[species][bucket], slot)
+      end
+    end
+  end
+  return GB.summarize(entries), index
+end
+
+-- A cargo slot holding a princess of `species` (preferImpure picks a drifted
+-- one to purify; otherwise a pure one). nil if none.
+local function findSpeciesPrincessSlot(config, species, preferImpure)
+  local _, index = M.genebankScan(config)
+  local g = index[species]
+  if not g then return nil end
+  if preferImpure then return g.impurePrincess[1] or g.purePrincess[1] end
+  return g.purePrincess[1] or g.impurePrincess[1]
+end
+
+-- A cargo slot holding a drone of `species`, preferring a pure one (the clean
+-- allele to purify toward). nil if none.
+local function findSpeciesDroneSlot(config, species)
+  local _, index = M.genebankScan(config)
+  local g = index[species]
+  if not g then return nil end
+  return g.pureDrone[1] or g.impureDrone[1]
+end
+
+-- Runs one same-species maintenance/purification cross for `species` at this
+-- site's apiary, to rebuild its reserve before it's drawn on again. Uses a
+-- drifted (impure) princess of the species as the vessel when there is one --
+-- bred against a PURE drone it converges back to homozygous -- else seeds a
+-- pure one. Returns a status string. (Bootstrapping a species from ONLY drones,
+-- via a spare/breeder princess, is a later addition -- see the v0.3 design memo;
+-- for now that case reports it can't replenish here.)
+function M.purifyToward(config, site, species)
+  local down = sides().down
+
+  local princessInd = M.readSideSlot(down, 1)
+  local haveVessel = princessInd and princessInd.active
+    and Cfg.speciesKey(princessInd.active.species) == species
+  if not haveVessel then
+    local slot = findSpeciesPrincessSlot(config, species, true)
+    if not slot then return "cannot_replenish_no_princess:" .. species end
+    Status.setStep("Replenishing " .. species .. " at " .. (site.name or "?"))
+    agent().select(slot)
+    if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+    princessInd = M.readSideSlot(down, 1)
+    if not princessInd then return "swap_queen_failed_readback" end
+  end
+
+  local droneSlot = findSpeciesDroneSlot(config, species)
+  if not droneSlot then return "cannot_replenish_no_drone:" .. species end
+  droneSlot = ensureSingleItemSlot(config, droneSlot)
+  if not droneSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(droneSlot)
+  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
+  return "replenishing " .. species
+end
+
 -- Runs one decision+action cycle for a "mutation" site. Executes an
 -- ordered breeding TREE toward site.targetSpecies: each visit plans (via
 -- M.planMutationStep) and acts on the next actionable step, advancing
@@ -754,6 +868,28 @@ function M.runMutationSite(config, site)
   local step, report = M.planMutationStep(config, site.targetSpecies, mutationTraits)
   if not step then
     return "waiting_on_parent_species:" .. (report or "no_known_recipe")
+  end
+
+  -- Genebank reserve gate (opt-in). Never draw a parent species below its
+  -- reserve (>=1 purebred princess + >=N drones): if a parent is short, run a
+  -- same-species purification/maintenance cross FIRST (rebuilding it), instead
+  -- of consuming it into a mutation and letting the line drift/vanish. When
+  -- ready, load PUREBRED parents so the mutation offspring stay clean. This is
+  -- what actually stops multi-step species drift.
+  if config.genebank then
+    local summary, index = M.genebankScan(config)
+    local verdict = GB.planStepDraw(summary, step.princessSpecies, step.droneSpecies, config.genebank)
+    if not verdict.ready then
+      if #verdict.replenish > 0 then
+        return M.purifyToward(config, site, verdict.replenish[1])
+      end
+      return "waiting_need_base_or_spare:" .. table.concat(verdict.unrecoverable, ", ")
+    end
+    -- Ready: override the planner's slot picks with PUREBRED specimens.
+    local pg = index[step.princessSpecies]
+    local dg = index[step.droneSpecies]
+    if pg and pg.purePrincess[1] then step.princessSlot = pg.purePrincess[1] end
+    if dg and dg.pureDrone[1] then step.droneSlot = dg.pureDrone[1] end
   end
 
   -- Special-condition gate: some steps need a foundation block / biome /

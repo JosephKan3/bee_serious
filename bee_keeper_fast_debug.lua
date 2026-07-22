@@ -17,6 +17,10 @@
   cycles         how many cycles to run (default 40)
   mode           traitmax (default), species, or mutation
   targetSpecies  only meaningful for species/mutation modes
+  genebank       (mutation mode) enable per-species purebred reserves
+                 (config.genebank). Correct for real Forestry; the local sim
+                 lacks species dominance so multi-step purification leaks --
+                 use for 1-step targets / inspecting the reserve logic.
   hard           affects traitmax's general population AND a
                  species-mode site's targetSpecies population --
                  scatters good QUALITY alleles across three DIFFERENT
@@ -40,10 +44,12 @@ local cycles = tonumber(args[1]) or 40
 local mode = args[2] or "traitmax"
 local targetSpecies = args[3]
 local hardMode = false
+local genebankMode = false
 local MODES = { traitmax = true, species = true, mutation = true }
 if not MODES[mode] then mode = "traitmax" end
 for _, a in ipairs(args) do
   if a == "hard" then hardMode = true end
+  if a == "genebank" then genebankMode = true end
 end
 if mode == "species" then targetSpecies = targetSpecies or "Sticky"
 elseif mode == "mutation" then targetSpecies = targetSpecies or "Common" end
@@ -76,6 +82,19 @@ if mode == "mutation" then
     config.mutationGraph = mutationGraph
   else
     config.mutationGraph = mutationGraph
+    -- Per-species genebank reserves prevent a base/intermediate species from
+    -- drifting away over a multi-step tree. OPT-IN here via the "genebank" arg:
+    -- the fix is correct for real Forestry (species dominance makes the
+    -- re-purification of a drifted line CONVERGE), but this local sim doesn't
+    -- model species dominance -- crossRaw picks the offspring's active species
+    -- at random from the mother's two alleles -- so purifying a heterozygous
+    -- line here LEAKS ~50% to the other parent's species and can't demonstrate
+    -- convergence. Until the sim gains a dominance model, leave it off by
+    -- default so the multi-step demo isn't misleadingly stalled. (1-step
+    -- targets work fine with it on.)
+    if genebankMode then
+      config.genebank = { minPrincesses = 1, minDrones = 8 }
+    end
     -- Auto-confirm any special-condition gate so a headless run never
     -- blocks; also mark those conditions satisfied in the sim world so the
     -- conditioned mutation can actually fire (see Sim world below).

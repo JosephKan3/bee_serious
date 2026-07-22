@@ -88,9 +88,18 @@ do
   check("canSpendPrincess TRUE with 1 pure princess AND full drone reservoir",
     GB.canSpendPrincess(ready, "Forest"))
 
-  local noReservoir = GB.summarize(entriesFor("Forest", 1, 0, 7, 0))
-  check("canSpendPrincess FALSE when the drone reservoir is short (7 < 8) -- can't recover",
-    not GB.canSpendPrincess(noReservoir, "Forest"))
+  -- Recovery floor (default 2), NOT the full reserve: a freshly-bred
+  -- intermediate with a princess + a couple drones can already be used.
+  local recoverable = GB.summarize(entriesFor("Forest", 1, 0, 2, 0))
+  check("canSpendPrincess TRUE at the recovery floor (2 pure drones, < the 8 reserve)",
+    GB.canSpendPrincess(recoverable, "Forest"))
+
+  local belowRecovery = GB.summarize(entriesFor("Forest", 1, 0, 1, 0))
+  check("canSpendPrincess FALSE below the recovery floor (1 < 2) -- can't re-purify",
+    not GB.canSpendPrincess(belowRecovery, "Forest"))
+
+  check("canSpendPrincess respects a custom recoveryDrones",
+    not GB.canSpendPrincess(recoverable, "Forest", { recoveryDrones = 3 }))
 
   local noPrincess = GB.summarize(entriesFor("Forest", 0, 2, 10, 0))
   check("canSpendPrincess FALSE with no pure princess to spend",
@@ -158,13 +167,14 @@ do
 end
 
 do
-  -- Princess parent has no drone reservoir but is recoverable (has drones<8 + a pure drone).
+  -- Princess parent below the RECOVERY floor (1 pure drone < 2) but recoverable
+  -- (has that 1 pure drone to purify toward) -> replenish it first.
   local e = {}
-  for _, x in ipairs(entriesFor("Forest", 1, 0, 3, 0)) do table.insert(e, x) end   -- short reservoir
+  for _, x in ipairs(entriesFor("Forest", 1, 0, 1, 0)) do table.insert(e, x) end   -- below recovery
   for _, x in ipairs(entriesFor("Wintry", 1, 0, 9, 0)) do table.insert(e, x) end
   local s = GB.summarize(e)
   local plan = GB.planStepDraw(s, "Forest", "Wintry")
-  check("planStepDraw asks to replenish the princess parent when its reservoir is short",
+  check("planStepDraw asks to replenish the princess parent when below the recovery floor",
     not plan.ready and plan.replenish[1] == "Forest")
 end
 
