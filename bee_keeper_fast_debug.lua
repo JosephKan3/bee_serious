@@ -92,9 +92,10 @@ if mode == "mutation" then
     -- convergence. Until the sim gains a dominance model, leave it off by
     -- default so the multi-step demo isn't misleadingly stalled. (1-step
     -- targets work fine with it on.)
-    if genebankMode then
-      config.genebank = { minPrincesses = 1, minDrones = 8 }
-    end
+    -- Explicit: honor the config's genebank settings only when asked, else
+    -- force it off (the config file enables it by default, but the sim can't
+    -- validate multi-step purification without a dominance model -- see above).
+    if not genebankMode then config.genebank = nil end
     -- Auto-confirm any special-condition gate so a headless run never
     -- blocks; also mark those conditions satisfied in the sim world so the
     -- conditioned mutation can actually fire (see Sim world below).

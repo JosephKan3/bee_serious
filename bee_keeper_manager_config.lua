@@ -98,6 +98,35 @@ return {
   chargeThreshold = 0.2,
   chargerPos = { x = 0, z = 0 },
 
+  -- Genebank: per-species purebred reserves that keep a breeding program from
+  -- ever losing a species (see bee_genebank.lua / docs). Opt-in -- set this table
+  -- to enable reserve gating in mutation mode; leave nil for the plain flow.
+  genebank = {
+    minPrincesses = 1,   -- purebred princesses kept per species (never spent)
+    minDrones = 8,       -- purebred drones kept per species (maintenance target)
+    recoveryDrones = 2,  -- min drones to safely re-purify after spending a princess
+
+    -- Naturally-spawning "spare" princesses used to breed WORKING princesses of
+    -- a species (converted against that species' bank drones), so the bank's own
+    -- purebred princess is never spent/converted. Only these are consumed as
+    -- fodder. (Provided by the user; expand as needed.)
+    breederSpecies = {
+      "Unusual", "Forest", "Modest", "Tropical", "Wintry",
+      "Marshy", "Sorcerous", "Mystical", "Rocky", "Ocean",
+    },
+
+    -- Only PRISTINE princesses/queens may be used as breeders/spares -- ignoble
+    -- ones degrade (lower lifetime, can't sustain a line), so they're never used
+    -- as fodder. (Detection of pristine vs ignoble is a TODO -- pending the
+    -- dominance/genome probe showing how the OC API surfaces it.)
+    pristineOnly = true,
+  },
+
+  -- Storage backend for genebanks: "shared" (a normal chest at storagePos, the
+  -- default) or "ae2" (an ME network via an me_interface component). See
+  -- bee_storage.lua.
+  storageBackend = "shared",
+
   -- DEPRECATED / unused: mutation recipes now come from the committed
   -- bee_mutations.dat dump, loaded into config.mutationGraph at startup by
   -- bee_keeper_manager_run.lua (see M.loadMutationGraph). Left here only so
