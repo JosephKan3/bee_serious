@@ -663,17 +663,20 @@ function M.newWorld(config, sites, opts)
         -- mating peels one off) gives plenty of attempts, plus a storage
         -- backup to restock from.
         local LEAF_DRONE_STACK = 32
-        -- Princesses are the sustainable resource but they DO get consumed
-        -- each mating, and when a mutation fires on the princess draw the
-        -- replacement takes the mutated species instead of the leaf's -- so
-        -- a leaf princess line can dwindle under several contending apiaries.
-        -- Stock a reserve in storage (restockFromStorage pulls them back)
-        -- so a multi-step demo doesn't stall waiting on a base princess.
-        local LEAF_PRINCESS_RESERVE = 40
+        -- Seed a modest pristine base reserve IN CARGO (the genebank scheduler
+        -- scans cargo). A base species is only truly consumed when a mutation
+        -- transforms its princess into the child species, and the scheduler
+        -- builds each bank cheaply (maintenance grows drones without spending
+        -- princesses), so only a handful of base princesses are needed per leaf
+        -- even for a deep tree. A few more sit in storage as a restock backup.
+        local LEAF_CARGO_PRINCESSES = 8
+        local LEAF_STORE_PRINCESSES = 8
         for _, leaf in ipairs(leaves) do
-          put(makeStartingRaw(traitList, leaf), "princess")
+          for _ = 1, LEAF_CARGO_PRINCESSES do
+            put(makeStartingRaw(traitList, leaf), "princess")
+          end
           put(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
-          for _ = 1, LEAF_PRINCESS_RESERVE do
+          for _ = 1, LEAF_STORE_PRINCESSES do
             putStorage(makeStartingRaw(traitList, leaf), "princess")
           end
           putStorage(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)

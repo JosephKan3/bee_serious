@@ -80,6 +80,7 @@ local Nav = require("bee_keeper_nav")
 local Status = require("bee_keeper_status")
 local MG = require("bee_mutation_graph")
 local GB = require("bee_genebank")
+local Sched = require("bee_genebank_scheduler")
 
 local M = {}
 M.Nav = Nav
@@ -913,6 +914,115 @@ function M.renewBaseSupply(config, site)
   return nil
 end
 
+-- ============================================================
+-- Scheduler-driven mutation (bee_genebank_scheduler): build purebred banks
+-- bottom-up to full reserve, then spend them -- the fix for deep (3+ step) trees.
+-- ============================================================
+
+-- Count of pristine HYBRID princesses in cargo carrying each species' allele --
+-- the conversion fodder the scheduler counts on to renew a species' supply.
+function M.countConvertible(config)
+  local c = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind and isPrincessOrQueenStack(stack) and ind.active and ind.inactive
+      and ind.active.species and ind.inactive.species then
+      local a = Cfg.speciesKey(ind.active.species)
+      local i = Cfg.speciesKey(ind.inactive.species)
+      if a ~= i then -- hybrid: carries both alleles, so it can convert toward either
+        c[a] = (c[a] or 0) + 1
+        c[i] = (c[i] or 0) + 1
+      end
+    end
+  end
+  return c
+end
+
+-- Assembles the pure scheduler state from a live cargo scan + the mutation graph.
+-- Returns (state, plan). Base species = configured breeders + graph leaves.
+function M.buildSchedulerState(config, site)
+  local graph = config.mutationGraph
+  local opts = config.genebank
+  local summary = M.genebankScan(config)
+
+  -- Base species = graph LEAVES we actually hold stock of (seeded pristine
+  -- breeders). Using only what's on hand -- not every configured breeder --
+  -- keeps the plan from routing through a base species we don't have (which
+  -- would just block). A leaf we lack that the target needs surfaces as a
+  -- "blocked: need pristine X" so the user knows to supply it.
+  local base = {}
+  for sp in pairs(summary) do
+    if (graph.leaves or {})[sp] then base[sp] = true end
+  end
+
+  local plan = MG.planBreedingTree(graph, base, site.targetSpecies)
+  local banks = {}
+  for sp, s in pairs(summary) do
+    banks[sp] = { purePrincesses = s.purePrincesses, pureDrones = s.pureDrones }
+  end
+  local state = {
+    banks = banks,
+    convertible = M.countConvertible(config),
+    steps = plan.steps,
+    baseSpecies = base,
+    target = site.targetSpecies,
+    minPrincesses = GB.minPrincesses(opts),
+    minDrones = GB.minDrones(opts),
+  }
+  return state, plan
+end
+
+-- Special conditions attached to the recipe that produces `result` in the plan.
+local function conditionsForResult(plan, result)
+  for _, step in ipairs(plan.steps) do
+    if step.result == result then return step.conditions end
+  end
+  return nil
+end
+
+-- Executes a scheduler "mutate" job: gate on special conditions, then load a
+-- PUREBRED princess of job.princess + PUREBRED drone of job.drone.
+local function executeMutateJob(config, site, job, plan)
+  local down = sides().down
+  local _, index = M.genebankScan(config)
+  local pSlot = index[job.princess] and index[job.princess].purePrincess[1]
+  local dSlot = index[job.drone] and index[job.drone].pureDrone[1]
+  if not pSlot or not dSlot then return "mutate_missing_pure_parents" end
+
+  local conditions = conditionsForResult(plan, job.result)
+  if conditions and #conditions > 0 then
+    if not M.gateSpecialConditions(config, conditions, job.result) then
+      return "awaiting_special_condition:" .. table.concat(conditions, "; ")
+    end
+  end
+
+  local toward = (job.result ~= site.targetSpecies) and (" toward " .. job.result) or ""
+  Status.setStep(string.format("Mutating %s x %s%s at %s",
+    job.princess, job.drone, toward, site.name or "?"))
+  agent().select(pSlot)
+  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+  dSlot = ensureSingleItemSlot(config, dSlot)
+  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(dSlot)
+  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
+  return string.format("mutating %s x %s%s", job.princess, job.drone, toward)
+end
+
+-- One genebank-scheduled decision+action for a mutation site (the apiary is
+-- already positioned; hybrids already junked). Turns the scheduler's next job
+-- into a real action.
+function M.runGenebankSchedule(config, site)
+  local state, plan = M.buildSchedulerState(config, site)
+  local job = Sched.nextJob(state)
+  if job.type == "done" then return "mutation_succeeded:switch_site_to_species_mode" end
+  if job.type == "blocked" then return "blocked:" .. tostring(job.need) end
+  if job.type == "convert" then return M.convertToward(config, site, job.to) end
+  if job.type == "grow" then return M.maintainBankAt(config, site, job.species) end
+  if job.type == "mutate" then return executeMutateJob(config, site, job, plan) end
+  return "unknown_job:" .. tostring(job.type)
+end
+
 -- Runs one decision+action cycle for a "mutation" site. Executes an
 -- ordered breeding TREE toward site.targetSpecies: each visit plans (via
 -- M.planMutationStep) and acts on the next actionable step, advancing
@@ -965,69 +1075,20 @@ function M.runMutationSite(config, site)
     end
   end
 
-  -- Genebank mode: junk any hybrids sitting in cargo before deciding -- they're
-  -- never used as parents (breeding them drifts a species), so they just clutter
-  -- the reserve math. Spare the target species so a first hybrid specimen of it
-  -- survives for the species-mode handoff.
+  -- Genebank mode: junk hybrid byproducts, then hand off to the bank SCHEDULER
+  -- (bee_genebank_scheduler via M.runGenebankSchedule): it builds each species'
+  -- purebred bank bottom-up to full reserve, converts pristine hybrids to renew
+  -- supply, and only spends a bank once it's actually stocked -- the fix for
+  -- deep (3+ step) trees.
   if config.genebank then
     M.junkHybrids(config, site)
-    -- back at the site after the trash trip
     if not gotoSite(site) then return "nav_failed_after_junk" end
+    return M.runGenebankSchedule(config, site)
   end
 
   local step, report = M.planMutationStep(config, site.targetSpecies, mutationTraits)
   if not step then
-    -- Blocked -- but in genebank mode a base species may just be temporarily out
-    -- of pure princesses; renew it by converting a pristine hybrid byproduct
-    -- back into it before giving up (the princess pool is conserved).
-    if config.genebank then
-      local renewed = M.renewBaseSupply(config, site)
-      if renewed then return renewed end
-    end
     return "waiting_on_parent_species:" .. (report or "no_known_recipe")
-  end
-
-  -- Genebank reserve gate (opt-in). A parent is only spent from PUREBRED stock,
-  -- and never below its reserve. Base (non-producible) species have an external
-  -- pristine supply, so any purebred specimen is spendable and a short bank is
-  -- rebuilt PURE x PURE (M.maintainBankAt); PRODUCIBLE intermediates keep
-  -- >=minPrincesses princesses / >=minDrones drones in reserve, and when short
-  -- the tree planner just breeds MORE of them (ownedSpecies de-owns a thin
-  -- intermediate). Loading purebred parents is what keeps offspring clean.
-  if config.genebank then
-    local opts = config.genebank
-    local producible = (config.mutationGraph and config.mutationGraph.producible) or {}
-    local summary, index = M.genebankScan(config)
-    local A, B = step.princessSpecies, step.droneSpecies
-    local aReserve = producible[A] and GB.minPrincesses(opts) or 0
-    local bReserve = producible[B] and GB.minDrones(opts) or 0
-    local aPure = (summary[A] and summary[A].purePrincesses) or 0
-    local bPureDrones = (summary[B] and summary[B].pureDrones) or 0
-
-    -- The DRONE parent short of its reserve: grow that bank PURE x PURE (a mating
-    -- yields several drones, so drone stock genuinely grows). If we lack a pure
-    -- princess of it to breed from, CONVERT a hybrid byproduct toward it first.
-    if not (bPureDrones > bReserve) then
-      if index[B] and #index[B].purePrincess >= 1 and #index[B].pureDrone >= 1 then
-        return M.maintainBankAt(config, site, B)
-      end
-      return M.convertToward(config, site, B)
-    end
-
-    -- The PRINCESS parent short of surplus: maintenance CAN'T grow princess count
-    -- (a queen yields only ~1 princess). A producible intermediate is instead
-    -- re-mutated (ownedSpecies de-owns a thin producible species, so the planner
-    -- routes back to breeding more of it). A base species is RENEWED by converting
-    -- a pristine hybrid byproduct back into it -- the princess pool is conserved,
-    -- so this recycles supply instead of exhausting a finite seed.
-    if not (aPure > aReserve) then
-      if producible[A] then return "building_intermediate:" .. A end
-      return M.convertToward(config, site, A)
-    end
-
-    -- Ready: load PUREBRED parents.
-    step.princessSlot = index[A].purePrincess[1]
-    step.droneSlot = index[B].pureDrone[1]
   end
 
   -- Special-condition gate: some steps need a foundation block / biome /
@@ -1769,7 +1830,10 @@ function M.runCycle(config)
       -- cargo. Without this, a mutation run can deadlock waiting on a
       -- parent it already owns -- e.g. 7 Forest princesses in storage while
       -- cargo has none, so the Forest x Wintry step never fires.
-      or entry:find("waiting_on_parent_species", 1, true) then
+      or entry:find("waiting_on_parent_species", 1, true)
+      -- Genebank scheduler "blocked" means it needs stock (a pristine base
+      -- princess, usually) that may be sitting in storage -- pull it back.
+      or entry:find("blocked", 1, true) then
       needsRestock = true
     end
   end
