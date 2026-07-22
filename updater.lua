@@ -95,6 +95,12 @@ function Updater:downloadFiles()
     "bee_keeper_manager_run.lua",
     "updater.lua",
     "version.lua",
+    -- Real GTNH mutation graph + species list, dumped once from a stationary
+    -- Adapter next to an apiary (see docs/oc_forestry_api.md). Shipped to the
+    -- robot as static data since the robot has no bee_housing component of its
+    -- own -- it never queries the graph live.
+    "bee_mutations.dat",
+    "bee_species.dat",
   }
 
   print("Downloading files...")
