@@ -850,6 +850,69 @@ function M.junkHybrids(config, site)
   return 0
 end
 
+-- A cargo princess usable to CONVERT toward `species`: she carries a `species`
+-- allele (active or inactive) but isn't already pure, so breeding her against
+-- pure `species` drones converges her line to homozygous `species` over a couple
+-- of generations. These are the pristine HYBRID byproducts of mutation crosses --
+-- since a pristine princess is never lost (she always yields a replacement
+-- princess), recycling them this way RENEWS a species' supply instead of
+-- exhausting a finite seed. Returns a slot, or nil.
+local function findConversionVessel(config, species)
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind and isPrincessOrQueenStack(stack) and ind.active and ind.inactive
+      and ind.active.species and ind.inactive.species then
+      local a = Cfg.speciesKey(ind.active.species)
+      local i = Cfg.speciesKey(ind.inactive.species)
+      if (a == species or i == species) and not (a == species and i == species) then
+        return slot
+      end
+    end
+  end
+  return nil
+end
+
+-- Convert a pristine hybrid princess toward `species`: breed her against a pure
+-- `species` drone. Her line's genotype converges to homozygous `species` (the
+-- robot judges by genotype, not the displayed dominant species). This is how a
+-- base species' princess supply is renewed from byproducts -- the piece that
+-- keeps a deep tree from exhausting its pristine base stock. Status string.
+function M.convertToward(config, site, species)
+  local down = sides().down
+  local dSlot = findPureDroneSlot(config, species)
+  if not dSlot then return "cannot_convert_no_pure_drone:" .. species end
+  local vessel = findConversionVessel(config, species)
+  if not vessel then return "need_pristine:" .. species end
+  Status.setStep("Converting a princess toward " .. species .. " at " .. (site.name or "?"))
+  agent().select(vessel)
+  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+  dSlot = ensureSingleItemSlot(config, dSlot)
+  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(dSlot)
+  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
+  return "converting toward " .. species
+end
+
+-- When planning is blocked for lack of a base species' princess, renew that
+-- supply by converting a pristine hybrid byproduct back into it (see
+-- M.convertToward). Scans the configured breeder/base species for one that has a
+-- conversion vessel + pure drones but no pure princess right now. Returns a
+-- status string if it acted, or nil if there's nothing to renew.
+function M.renewBaseSupply(config, site)
+  local _, index = M.genebankScan(config)
+  local breeders = (config.genebank and config.genebank.breederSpecies) or {}
+  for _, sp in ipairs(breeders) do
+    local g = index[sp]
+    local hasPurePrincess = g and #g.purePrincess >= 1
+    local hasPureDrone = g and #g.pureDrone >= 1
+    if not hasPurePrincess and hasPureDrone and findConversionVessel(config, sp) then
+      return M.convertToward(config, site, sp)
+    end
+  end
+  return nil
+end
+
 -- Runs one decision+action cycle for a "mutation" site. Executes an
 -- ordered breeding TREE toward site.targetSpecies: each visit plans (via
 -- M.planMutationStep) and acts on the next actionable step, advancing
@@ -914,6 +977,13 @@ function M.runMutationSite(config, site)
 
   local step, report = M.planMutationStep(config, site.targetSpecies, mutationTraits)
   if not step then
+    -- Blocked -- but in genebank mode a base species may just be temporarily out
+    -- of pure princesses; renew it by converting a pristine hybrid byproduct
+    -- back into it before giving up (the princess pool is conserved).
+    if config.genebank then
+      local renewed = M.renewBaseSupply(config, site)
+      if renewed then return renewed end
+    end
     return "waiting_on_parent_species:" .. (report or "no_known_recipe")
   end
 
@@ -934,23 +1004,25 @@ function M.runMutationSite(config, site)
     local aPure = (summary[A] and summary[A].purePrincesses) or 0
     local bPureDrones = (summary[B] and summary[B].pureDrones) or 0
 
-    -- The DRONE parent short of its reserve: grow that bank PURE x PURE -- a
-    -- mating yields several drones (fertility), so drone stock genuinely grows.
+    -- The DRONE parent short of its reserve: grow that bank PURE x PURE (a mating
+    -- yields several drones, so drone stock genuinely grows). If we lack a pure
+    -- princess of it to breed from, CONVERT a hybrid byproduct toward it first.
     if not (bPureDrones > bReserve) then
       if index[B] and #index[B].purePrincess >= 1 and #index[B].pureDrone >= 1 then
         return M.maintainBankAt(config, site, B)
       end
-      return "need_pristine:" .. B
+      return M.convertToward(config, site, B)
     end
 
     -- The PRINCESS parent short of surplus: maintenance CAN'T grow princess count
-    -- (a queen yields only ~1 princess), so we don't maintain -- an intermediate
-    -- is instead re-mutated (ownedSpecies de-owns a thin producible species, so
-    -- the planner already routes back to breeding more of it); a base species
-    -- has run out of its pristine supply and needs more.
+    -- (a queen yields only ~1 princess). A producible intermediate is instead
+    -- re-mutated (ownedSpecies de-owns a thin producible species, so the planner
+    -- routes back to breeding more of it). A base species is RENEWED by converting
+    -- a pristine hybrid byproduct back into it -- the princess pool is conserved,
+    -- so this recycles supply instead of exhausting a finite seed.
     if not (aPure > aReserve) then
-      if not producible[A] then return "need_pristine:" .. A end
-      return "building_intermediate:" .. A
+      if producible[A] then return "building_intermediate:" .. A end
+      return M.convertToward(config, site, A)
     end
 
     -- Ready: load PUREBRED parents.

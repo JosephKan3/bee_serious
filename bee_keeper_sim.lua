@@ -169,7 +169,13 @@ local function crossRaw(traitList, parentA, parentB)
     end
     child[trait] = { active = a, inactive = b }
   end
-  child._natural = false -- bred offspring are IGNOBLE (only wild stock is pristine)
+  -- Pristine/ignoble is a property of the PRINCESS LINE, inherited from the
+  -- mother (the princess = parentA): a pristine queen's offspring princess is
+  -- pristine (and never dies), an ignoble one's stays ignoble (and dies out).
+  -- We only ever seed/use pristine stock, so everything stays pristine -- a
+  -- princess is never "used up", it just becomes the offspring princess, so the
+  -- princess pool is conserved and renewable via conversion.
+  child._natural = parentA._natural
   return child
 end
 
