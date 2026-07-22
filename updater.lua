@@ -94,6 +94,8 @@ function Updater:downloadFiles()
     "bee_keeper_manager.lua",
     "bee_keeper_manager_run.lua",
     "bee_mutation_graph.lua",
+    "bee_genebank.lua",
+    "bee_storage.lua",
     "updater.lua",
     "version.lua",
     -- Real GTNH mutation graph + species list, dumped once from a stationary
