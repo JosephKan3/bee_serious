@@ -804,11 +804,18 @@ local function dumpEntriesAt(pos, slotCount, discardEntries, keepId)
   local ok = Nav.gotoXZ(pos.x, pos.z)
   if not ok then return 0 end
 
-  slotCount = slotCount or 54
+  local down = sides().down
+  -- Prefers the REAL reported size over the configured fallback -- same
+  -- reasoning as M.restockFromStorage/M.analyzeWorkingSlots' honey
+  -- restock already use: a hardcoded slot count silently wastes room in
+  -- a larger real container, or tries to address slots that don't
+  -- exist at all in a smaller one. This was the one place in the file
+  -- that never queried dynamically, only ever trusting the config
+  -- value (or a bare 54 guess).
+  slotCount = invCtrl().getInventorySize(down) or slotCount or 54
   local candidateSlots = {}
   for s = 1, slotCount do table.insert(candidateSlots, s) end
 
-  local down = sides().down
   local dropped = 0
   for _, entry in ipairs(discardEntries) do
     if entry.drone.id ~= keepId and entry.drone._slot then
