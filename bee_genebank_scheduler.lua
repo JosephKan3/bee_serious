@@ -33,13 +33,6 @@
 
 local M = {}
 
--- Bank target for a species: the final target only needs to be REACHED (1
--- princess, no drone bank); every other species needs the full reserve.
-local function bankTarget(species, target, minP, minD)
-  if species == target then return 1, 0 end
-  return minP, minD
-end
-
 local function bankOf(banks, s)
   return banks[s] or { purePrincesses = 0, pureDrones = 0 }
 end
@@ -69,9 +62,22 @@ function M.nextJob(state)
   local target = state.target
   local minP = state.minPrincesses or 1
   local minD = state.minDrones or 8
+  local recovery = state.recoveryDrones or 2
 
   -- Reached the goal: one pure princess of the target is enough.
   if bankOf(banks, target).purePrincesses >= 1 then return { type = "done" } end
+
+  -- Which species are used as a DRONE parent -- only those need the full minDrones
+  -- reserve. A species used only as a princess parent (or a leaf that's just a
+  -- princess source) needs only a small `recovery` drone stock (enough to convert
+  -- byproducts back to it). This stops the scheduler over-building drone banks it
+  -- never spends, which is what slowed deep trees down.
+  local droneParents = {}
+  for _, step in ipairs(steps) do droneParents[step.drone] = true end
+  local function targetFor(species)
+    if species == target then return 1, 0 end
+    return minP, (droneParents[species] and minD or recovery)
+  end
 
   -- Which base species the tree actually uses (as a parent of some step).
   local usedBase = {}
@@ -85,7 +91,7 @@ function M.nextJob(state)
   -- of drones, grown pure x pure. If it can't be renewed at all, we're blocked.
   for _, b in ipairs(sortedKeys(usedBase)) do
     local have = bankOf(banks, b)
-    local tp, td = bankTarget(b, target, minP, minD)
+    local tp, td = targetFor(b)
     if have.purePrincesses < tp then
       if (convertible[b] or 0) >= 1 and have.pureDrones >= 1 then
         return { type = "convert", to = b }
@@ -103,7 +109,7 @@ function M.nextJob(state)
   for _, step in ipairs(steps) do
     local X, A, B = step.result, step.princess, step.drone
     local have = bankOf(banks, X)
-    local tp, td = bankTarget(X, target, minP, minD)
+    local tp, td = targetFor(X)
     local aHasPrincess = bankOf(banks, A).purePrincesses >= 1
     local bHasDrone = bankOf(banks, B).pureDrones >= 1
 
@@ -138,5 +144,4 @@ function M.nextJob(state)
   return { type = "blocked", need = "no actionable job (replan)" }
 end
 
-M._bankTarget = bankTarget
 return M

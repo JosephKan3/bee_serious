@@ -68,11 +68,24 @@ do
     j.type == "mutate" and j.princess == "Forest" and j.drone == "Wintry" and j.result == "Common", j.type)
 end
 
--- Intermediate made but drone bank short -> grow it (NOT advance to next level)
+-- Role-aware drone targets: Common is only ever a PRINCESS parent here, so it
+-- needs just the small recovery drone reserve (default 2), not the full minDrones
+-- -- it advances once it has that, instead of over-building a bank it never spends.
 do
-  local j = S.nextJob(state(withBase({ Common = b(1, 3) })))
-  check("Common made, drones short -> grow Common (before spending it)",
+  local j = S.nextJob(state(withBase({ Common = b(1, 1) })))
+  check("princess-only intermediate below recovery drones -> grow",
     j.type == "grow" and j.species == "Common", j.type)
+
+  local j2 = S.nextJob(state(withBase({ Common = b(1, 2) })))
+  check("princess-only intermediate AT recovery drones -> advance (mutate Cultivated), not over-build",
+    j2.type == "mutate" and j2.result == "Cultivated", j2.type)
+end
+
+-- A DRONE parent (Cultivated feeds Noble as a drone) still needs the FULL reserve.
+do
+  local j = S.nextJob(state(withBase({ Common = b(1, 8), Cultivated = b(1, 5) })))
+  check("drone-parent intermediate below minDrones -> grow to full reserve",
+    j.type == "grow" and j.species == "Cultivated", j.type)
 end
 
 -- Common bank ready -> advance to Cultivated (mutate Common x Forest)

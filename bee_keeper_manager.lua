@@ -969,6 +969,7 @@ function M.buildSchedulerState(config, site)
     target = site.targetSpecies,
     minPrincesses = GB.minPrincesses(opts),
     minDrones = GB.minDrones(opts),
+    recoveryDrones = GB.recoveryDrones(opts),
   }
   return state, plan
 end
