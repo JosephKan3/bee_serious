@@ -35,14 +35,30 @@ both → `"fast"`; `BOTH_2` / `toleranceBoth1` → `"both2"` / `"both1"`; boolea
 200 entries, 143 with allele overrides. Re-run after a mod update:
 `lua scripts/parse_bee_templates.lua` (edit the `SOURCES` paths at the top).
 
+## Consuming the templates
+
+`bee_allele_values.lua` maps the normalized enum names → the raw genome values
+`bee_trait_config.isGoodValue` compares (numeric scales taken exactly from
+`EnumAllele.java`: speed 0.3–1.7 floats, fertility 1–4, lifespan 10–70, flowering
+5–99; tolerance `both5`→`"BOTH_5"`; booleans). `bee_templates.lua` loads
+`bee_templates.dat`, applies that mapping, and reconciles the Java-enum keys to
+live display names (`canonical()` strips mod prefixes + non-alphanumerics), giving
+`bee_traitmax_mutation.selectDonors` a live-species-keyed template map.
+
+**Coverage note (validated over the real data):** templates supply donors for
+fertility / lifespan / flowering / nocturnal / tolerantFlyer / caveDwelling, but
+**zero** for `temperatureTolerance`/`humidityTolerance` `BOTH_5` and the
+`flowersRocks` provider — no single species default carries those, so they can't be
+obtained from one mutation (and `flowersRocks` is bee_trait_config's own UNCONFIRMED
+guess). Tolerance is built up by breeding, not injected by a template.
+
 ## TODOs
 
-1. **Numeric mapping.** The template values are enum NAMES (`"fast"`, `"high"`,
-   `"shortest"`). `bee_trait_config.isGoodValue` compares the game's raw genome
-   values (speed≈0.6/1.2 floats, fertility 1–4 ints, tolerance strings like
-   `"BOTH_5"`). Build an enum-name → raw-value map (from `EnumAllele` in the Forestry
-   repo) so `bee_templates.dat` feeds `bee_traitmax_mutation.selectDonors` directly.
-   Confirm the exact floats against a live `getQueen` dump.
+1. **Confirm exact raw floats** against a live `getQueen` dump — the enum→numeric
+   map in `bee_allele_values.lua` is taken from `EnumAllele.java` and should be
+   right, but the live tolerance/flowerProvider string forms (`"BOTH_5"` vs
+   `"BOTH5"`, `"flowersRocks"`) were never seen in a real dump. (Numeric mapping
+   itself: DONE.)
 2. **Validate breeding trees.** Cross-check the committed `bee_mutations.dat`
    (dumped from the live game) against the `registerMutation(a, b, chance)` calls in
    these repos — parents, chance, and special conditions — to catch any dump gaps or

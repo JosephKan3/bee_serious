@@ -98,6 +98,8 @@ function Updater:downloadFiles()
     "bee_genebank_scheduler.lua",
     "bee_rainbow.lua",
     "bee_traitmax_mutation.lua",
+    "bee_allele_values.lua",
+    "bee_templates.lua",
     "bee_storage.lua",
     "updater.lua",
     "version.lua",
@@ -107,6 +109,10 @@ function Updater:downloadFiles()
     -- own -- it never queries the graph live.
     "bee_mutations.dat",
     "bee_species.dat",
+    -- Per-species DEFAULT allele templates, parsed from the mod source repos
+    -- (see docs/data_sources.md). The fuel for traitmax-via-mutation: which
+    -- species carries a good allele for each trait.
+    "bee_templates.dat",
   }
 
   print("Downloading files...")
