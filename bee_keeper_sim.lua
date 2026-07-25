@@ -641,7 +641,8 @@ function M.newWorld(config, sites, opts)
   -- population's own 7, well past the usual 15 available).
   local seededSpecies = {}
   for _, s in ipairs(sites) do
-    if s.mode == "mutation" and not seededSpecies["mut:" .. tostring(s.targetSpecies)] then
+    if (s.mode == "mutation" or s.mode == "rainbow")
+      and not seededSpecies["mut:" .. tostring(s.targetSpecies)] then
       seededSpecies["mut:" .. tostring(s.targetSpecies)] = true
       -- Seed the BASE LEAF bees the target's breeding tree actually needs
       -- (opts.mutationLeaves, computed by the caller from the real graph),

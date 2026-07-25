@@ -81,6 +81,7 @@ local Status = require("bee_keeper_status")
 local MG = require("bee_mutation_graph")
 local GB = require("bee_genebank")
 local Sched = require("bee_genebank_scheduler")
+local Rainbow = require("bee_rainbow")
 
 local M = {}
 M.Nav = Nav
@@ -899,38 +900,69 @@ local function executeJobAtApiary(config, site, job)
   return "mutating " .. job.princess .. " x " .. job.drone .. toward
 end
 
--- Assembles the scheduler state from the storage scan + the mutation graph.
--- Base species = graph LEAVES we actually hold (so the plan never routes through
--- a breeder we lack; a missing one surfaces as "blocked: need pristine X").
-function M.buildSchedulerState(config, site, summary, convertible)
+-- Assembles the scheduler state from the storage scan + the mutation graph, for
+-- the given `target` species. Base species = graph LEAVES we actually hold (so
+-- the plan never routes through a breeder we lack; a missing one surfaces as
+-- "blocked: need pristine X").
+function M.buildSchedulerState(config, site, summary, convertible, target)
   local graph = config.mutationGraph
   local opts = config.genebank
   local base = {}
   for sp in pairs(summary) do
     if (graph.leaves or {})[sp] then base[sp] = true end
   end
-  local plan = MG.planBreedingTree(graph, base, site.targetSpecies)
+  local plan = MG.planBreedingTree(graph, base, target)
   local banks = {}
   for sp, s in pairs(summary) do
     banks[sp] = { purePrincesses = s.purePrincesses, pureDrones = s.pureDrones }
   end
   local state = {
     banks = banks, convertible = convertible, steps = plan.steps,
-    baseSpecies = base, target = site.targetSpecies,
+    baseSpecies = base, target = target,
     minPrincesses = GB.minPrincesses(opts), minDrones = GB.minDrones(opts),
     recoveryDrones = GB.recoveryDrones(opts),
   }
   return state, plan
 end
 
--- One genebank-scheduled decision+action for a mutation site: sync banks to
--- storage, ask the scheduler for the next job, fetch its parents, and breed them.
+-- RAINBOW: the next species to obtain a purebred bank of, given current banks
+-- (from the storage summary). nil when every reachable species is banked.
+local function rainbowTarget(config, summary)
+  local graph = config.mutationGraph
+  local ownedLeaves, banked = {}, {}
+  for sp, s in pairs(summary) do
+    if (graph.leaves or {})[sp] then ownedLeaves[sp] = true end
+    if (s.purePrincesses or 0) >= 1 then banked[sp] = true end
+  end
+  local targetSet = Rainbow.targetSet(graph, ownedLeaves, config.rainbowTargetProvider)
+  return Rainbow.nextTarget(graph, ownedLeaves, banked, targetSet),
+    Rainbow.remaining(banked, targetSet)
+end
+
+-- One genebank-scheduled decision+action for a mutation OR rainbow site: sync
+-- banks to storage, choose the target (fixed for mutation, next-unbanked for
+-- rainbow), ask the scheduler for the next job, fetch its parents, and breed them.
 function M.runGenebankSchedule(config, site)
   local summary, convertible, slotsByKey = M.syncBanksToStorage(config)
-  local state, plan = M.buildSchedulerState(config, site, summary, convertible)
+
+  local target, remaining = site.targetSpecies, nil
+  if site.mode == "rainbow" then
+    target, remaining = rainbowTarget(config, summary)
+    if not target then return "rainbow_complete" end
+  end
+
+  local state, plan = M.buildSchedulerState(config, site, summary, convertible, target)
   local job = Sched.nextJob(state)
-  if job.type == "done" then return "mutation_succeeded:switch_site_to_species_mode" end
-  if job.type == "blocked" then return "blocked:" .. tostring(job.need) end
+  if job.type == "done" then
+    -- Rainbow's target is always an UNBANKED species, so the scheduler only
+    -- returns done for a single-target mutation site; rainbow re-picks next visit.
+    if site.mode == "rainbow" then return "rainbow_banked:" .. target end
+    return "mutation_succeeded:switch_site_to_species_mode"
+  end
+  if job.type == "blocked" then
+    return (site.mode == "rainbow" and ("[rainbow " .. tostring(remaining) .. " left] ") or "")
+      .. "blocked:" .. tostring(job.need)
+  end
 
   -- Special-condition gate BEFORE fetching (don't move bees for a step we can't run).
   if job.type == "mutate" then
@@ -991,19 +1023,23 @@ function M.runMutationSite(config, site)
   -- lucky success isn't immediately overwritten. Intermediates are NOT
   -- handed off here: they're just another owned species the plan below
   -- keeps building on toward the real target.
-  for _, slot in ipairs(config.workingSlots) do
-    local individual = M.readOwnSlot(slot)
-    if individual and individual.active and Cfg.speciesKey(individual.active.species) == site.targetSpecies then
-      return "mutation_succeeded:switch_site_to_species_mode"
+  -- Single-target mutation only: once the target shows up, hand off to species
+  -- mode. (Rainbow has no single target -- it keeps building the next species.)
+  if site.mode == "mutation" then
+    for _, slot in ipairs(config.workingSlots) do
+      local individual = M.readOwnSlot(slot)
+      if individual and individual.active and Cfg.speciesKey(individual.active.species) == site.targetSpecies then
+        return "mutation_succeeded:switch_site_to_species_mode"
+      end
     end
   end
 
-  -- Genebank mode: junk hybrid byproducts, then hand off to the bank SCHEDULER
-  -- (bee_genebank_scheduler via M.runGenebankSchedule): it builds each species'
-  -- purebred bank bottom-up to full reserve, converts pristine hybrids to renew
-  -- supply, and only spends a bank once it's actually stocked -- the fix for
-  -- deep (3+ step) trees.
-  if config.genebank then
+  -- Genebank / rainbow: junk hybrid byproducts, then hand off to the bank
+  -- SCHEDULER (M.runGenebankSchedule) -- it builds each species' purebred bank
+  -- bottom-up to full reserve, converts pristine hybrids to renew supply, and
+  -- only spends a bank once it's stocked. Rainbow reuses the same machinery,
+  -- just cycling the target through every reachable species.
+  if config.genebank or site.mode == "rainbow" then
     M.junkHybrids(config, site)
     if not gotoSite(site) then return "nav_failed_after_junk" end
     return M.runGenebankSchedule(config, site)
@@ -1713,7 +1749,7 @@ function M.runCycle(config)
       status = M.runQualitySite(config, site)
     elseif site.mode == "species" then
       status = M.runQualitySite(config, site)
-    elseif site.mode == "mutation" then
+    elseif site.mode == "mutation" or site.mode == "rainbow" then
       status = M.runMutationSite(config, site)
     else
       status = "unknown_mode:" .. tostring(site.mode)

@@ -45,12 +45,15 @@ local mode = args[2] or "traitmax"
 local targetSpecies = args[3]
 local hardMode = false
 local genebankMode = false
-local MODES = { traitmax = true, species = true, mutation = true }
+local MODES = { traitmax = true, species = true, mutation = true, rainbow = true }
 if not MODES[mode] then mode = "traitmax" end
 for _, a in ipairs(args) do
   if a == "hard" then hardMode = true end
   if a == "genebank" then genebankMode = true end
 end
+-- Rainbow is the genebank scheduler cycling its target through every species
+-- reachable from the seeded base leaves -- it always needs the bank machinery.
+if mode == "rainbow" then genebankMode = true end
 if mode == "species" then targetSpecies = targetSpecies or "Sticky"
 elseif mode == "mutation" then targetSpecies = targetSpecies or "Common" end
 
@@ -65,7 +68,7 @@ local config = require("bee_keeper_manager_config")
 -- Meadows drone) reachable from the sim's seeded mutation-site stock;
 -- pass a deeper target as arg 3 to exercise a multi-step tree.
 local mutationGraph = nil
-if mode == "mutation" then
+if mode == "mutation" or mode == "rainbow" then
   local f = io.open("bee_mutations.dat", "r")
   if f then
     local ok, g = pcall(MG.parse, f:read("*a"))
@@ -113,7 +116,15 @@ end
 -- graph, empty starting stock) -- handed to the sim so it seeds exactly
 -- those, letting a multi-step target breed to completion headlessly.
 local mutationLeaves = nil
-if mutationGraph then
+if mode == "rainbow" then
+  -- Rainbow has no single target -- seed a small base pool and let it build every
+  -- species reachable from it. (In real use this is your pristine breeder stock.)
+  mutationLeaves = { "Forest", "Wintry" }
+  local R = require("bee_rainbow")
+  local held = {}; for _, l in ipairs(mutationLeaves) do held[l] = true end
+  local n = 0; for _ in pairs(R.targetSet(mutationGraph, held)) do n = n + 1 end
+  print("Rainbow mode: building all " .. n .. " species reachable from " .. table.concat(mutationLeaves, ", "))
+elseif mutationGraph then
   local plan = MG.planBreedingTree(mutationGraph, {}, targetSpecies)
   if plan.reachable then
     mutationLeaves = plan.missingLeaves

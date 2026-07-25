@@ -109,6 +109,22 @@ press Enter to keep it, or type `rescan` to redo the area scan.
   you don't own are reported by name so you know what to go gather. Once a
   specimen of `targetSpecies` shows up in the harvest, switch the site to
   `species` mode to take over from there.
+- **rainbow** — get a purebred bank of **every species reachable from your base
+  bees**. Builds on the genebank scheduler: it cycles its target through each
+  reachable species shallow→deep, so every one is banked purebred without you
+  naming targets individually. The set to obtain is a decoupled provider
+  (default: everything reachable from the base leaves you hold; a user-supplied
+  list can be dropped in via `config.rainbowTargetProvider`). Reports
+  `[rainbow N left]` progress and `rainbow_complete` when done. Requires the
+  genebank (`config.genebank`) and a storage chest.
+
+## Genebank & storage
+
+`mutation`/`rainbow` sites use a per-species **genebank** (`config.genebank`):
+each species is kept as a purebred bank (≥1 pristine princess + drones), built
+pure×pure and never drifted. Banks live in the storage chest (cargo is a
+transient working buffer), so the robot can juggle many species at once. Set
+`config.storageBackend` to `"shared"` (a chest) or `"ae2"` (an ME network).
 
 ## Updating
 
