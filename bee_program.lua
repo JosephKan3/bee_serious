@@ -18,11 +18,10 @@
 
 local M = {}
 
--- The default program: max the alleles, then bank every reachable species.
--- "perfect" (imbue the maxed allele set into each banked species) is the planned
--- third phase -- add it here once the per-species combine is built. Override via
--- config (config.program = { phases = {...} }).
-M.DEFAULT_PHASES = { "traitmax", "rainbow" }
+-- The default program: max the alleles, bank every reachable species, then make
+-- each banked species PERFECT (species-pure + the maxed allele set bred in).
+-- Override via config (config.program = { phases = {...} }).
+M.DEFAULT_PHASES = { "traitmax", "rainbow", "perfect" }
 
 -- Create program state from a phase list (defaults to DEFAULT_PHASES).
 function M.new(phases)

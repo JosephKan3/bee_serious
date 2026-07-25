@@ -10,7 +10,7 @@ end
 do
   local prog = P.new()
   check("default program starts at traitmax", P.current(prog) == "traitmax")
-  check("default program is 2 phases (traitmax, rainbow)", P.remaining(prog) == 2)
+  check("default program is 3 phases (traitmax, rainbow, perfect)", P.remaining(prog) == 3)
   check("not done at start", not P.done(prog))
 end
 

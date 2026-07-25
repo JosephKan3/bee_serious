@@ -1763,16 +1763,33 @@ local function coverableTraits(config, ownedLeaves)
   return cov
 end
 
--- One storage pass for program-phase evaluation (navigates to storage): the
--- species summary (for rainbow's all-banked check) plus whether some stored bee
--- is homozygous-good on EVERY coverable trait (traitmax's max-allele-set goal).
+-- Whether a genome is homozygous-good on every trait in `cov` (empty cov -> the
+-- max allele set is nothing to reach, treated as not-a-max-bee).
+local function isCoverableGG(ind, cov)
+  if #cov == 0 then return false end
+  for _, t in ipairs(cov) do
+    if not (Cfg.isGoodValue(t, ind.active[t]) and Cfg.isGoodValue(t, ind.inactive[t])) then
+      return false
+    end
+  end
+  return true
+end
+
+-- One storage pass for program-phase evaluation (navigates to storage). Returns:
+--   summary       = { [species] = { purePrincesses, pureDrones } }  (rainbow banks)
+--   coverable     = the coverable target traits (the max allele set)
+--   maxBeeReached = some stored bee is homozygous-good on every coverable trait
+--                   (traitmax's goal)
+--   banked        = { [species]=true } species with a purebred princess banked
+--   perfected     = { [species]=true } species with a stored bee that is BOTH
+--                   species-pure AND coverable-GG (the perfect phase's goal)
 function M.scanStorageForProgram(config)
   local down = sides().down
-  local out = { summary = {}, maxBeeReached = false }
+  local out = { summary = {}, maxBeeReached = false, banked = {}, perfected = {}, coverable = {} }
   if not config.storagePos or not config.mutationGraph then return out end
   if not Nav.gotoXZ(config.storagePos.x, config.storagePos.z) then return out end
   local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
-  local genomes = {}
+  local bees = {} -- { {species, pure, ind}, ... }
   for s = 1, size do
     local stack = invCtrl().getStackInSlot(down, s)
     local c = classifyBee(stack)
@@ -1781,44 +1798,64 @@ function M.scanStorageForProgram(config)
       out.summary[c.species] = rec
       if c.pure and c.role == "princess" then rec.purePrincesses = rec.purePrincesses + c.size
       elseif c.pure and c.role == "drone" then rec.pureDrones = rec.pureDrones + c.size end
-      genomes[#genomes + 1] = readIndividual(stack)
+      if c.pure then out.banked[c.species] = true end
+      bees[#bees + 1] = { species = c.species, pure = c.pure, ind = readIndividual(stack) }
     end
   end
   local ownedLeaves = {}
   for sp in pairs(out.summary) do
     if (config.mutationGraph.leaves or {})[sp] then ownedLeaves[sp] = true end
   end
-  local cov = coverableTraits(config, ownedLeaves)
-  if #cov > 0 then
-    for _, ind in ipairs(genomes) do
-      local allGG = true
-      for _, t in ipairs(cov) do
-        if not (Cfg.isGoodValue(t, ind.active[t]) and Cfg.isGoodValue(t, ind.inactive[t])) then
-          allGG = false; break
-        end
-      end
-      if allGG then out.maxBeeReached = true; break end
+  out.coverable = coverableTraits(config, ownedLeaves)
+  for _, b in ipairs(bees) do
+    if isCoverableGG(b.ind, out.coverable) then
+      out.maxBeeReached = true
+      if b.pure then out.perfected[b.species] = true end -- pure species + all good = perfect
     end
   end
   return out
 end
 
--- Evaluate the active program phase: if its goal is met, advance. Returns the
--- mode every site should run this cycle (nil when no program / program done).
+-- The next species to PERFECT: a reachable species that is banked (rainbow gave
+-- it a purebred) but not yet perfected (no stored bee that is species-pure AND
+-- coverable-GG). Deterministic (lexicographic). nil -> perfect phase complete.
+local function perfectTarget(config, scan)
+  local reachable = Rainbow.targetSet(config.mutationGraph, {}, config.rainbowTargetProvider)
+  -- Also treat held leaves as reachable species to perfect.
+  for sp in pairs(scan.banked) do reachable[sp] = reachable[sp] end
+  local best
+  for sp in pairs(scan.banked) do
+    if not scan.perfected[sp] and (not best or sp < best) then best = sp end
+  end
+  return best
+end
+
+-- Evaluate the active program phase: if its goal is met, advance. Returns
+--   (phaseMode, targetSpecies) -- targetSpecies is set only for the perfect
+-- phase (the species being perfected this cycle). nil phaseMode -> program done.
 function M.evaluateProgram(config)
   local prog = config.program
   if not prog then return nil end
   local phase = Program.current(prog)
   if not phase then return nil end
   local scan = M.scanStorageForProgram(config)
-  local complete = false
+
+  local complete, target = false, nil
   if phase == "traitmax" then
     complete = scan.maxBeeReached
   elseif phase == "rainbow" then
     complete = (rainbowTarget(config, scan.summary) == nil)
+  elseif phase == "perfect" then
+    target = perfectTarget(config, scan)
+    complete = (target == nil) -- every reachable banked species is perfected
   end
-  if complete then phase = Program.advance(prog) end
-  return phase
+
+  if complete then
+    phase = Program.advance(prog)
+    -- Recompute a target if we just entered the perfect phase.
+    if phase == "perfect" then target = perfectTarget(config, scan) end
+  end
+  return phase, target
 end
 
 -- ============================================================
@@ -1876,10 +1913,18 @@ function M.runCycle(config)
   -- cycle before any site is visited (it does one storage scan; see
   -- M.scanStorageForProgram -- a candidate to throttle if trips get costly).
   if config.program then
-    local phaseMode = M.evaluateProgram(config)
+    local phaseMode, target = M.evaluateProgram(config)
     if phaseMode then
-      for _, s in ipairs(config.sites) do s.mode = phaseMode end
-      table.insert(log, string.format("[program] phase: %s (%d left)", phaseMode, Program.remaining(config.program)))
+      -- The "perfect" phase runs SPECIES mode toward the current target species
+      -- (breeding the maxed allele set from the traitmax bee into each banked
+      -- species, one at a time); other phases map directly to a site mode.
+      local siteMode = (phaseMode == "perfect") and "species" or phaseMode
+      for _, s in ipairs(config.sites) do
+        s.mode = siteMode
+        if phaseMode == "perfect" then s.targetSpecies = target end
+      end
+      table.insert(log, string.format("[program] phase: %s%s (%d left)",
+        phaseMode, target and (" -> " .. target) or "", Program.remaining(config.program)))
     else
       table.insert(log, "[program] complete")
     end
