@@ -1,19 +1,17 @@
 --[[
-  PERFECT phase mechanic -- current behavior + KNOWN LIMITATION.
+  End-to-end test for the PERFECT phase, wired to the bee_combine serial-imprint
+  handler (M.runPerfectSite). Drives the real manager + sim: species mode toward X
+  with the traitmax MAX bee (a DIFFERENT species, all traits good) as the donor
+  must breed a bee that is BOTH species-pure X AND homozygous-good on every trait.
 
-  The perfect phase runs species mode toward species X with the traitmax MAX bee
-  (a DIFFERENT species, all traits good) as the allele donor, aiming for a bee
-  that is BOTH species-pure X AND homozygous-good on every target trait.
-
-  FINDING (this test): the donor's good alleles DO get bred into X (real
-  progress), but naive species mode PLATEAUS well short of a fully-perfect X --
-  species purity and trait-fixing are in tension when the only good-allele source
-  is a foreign species (each cross toward X-pure with bad-X drones dilutes the
-  good alleles; each cross with the donor re-contaminates the species). So this
-  test asserts the progress that works and DOCUMENTS the plateau; achieving a
-  full 9/9 X-pure-perfect needs a smarter per-species combine (e.g. first convert
-  the allele set into an X-carrier bank, then homozygize within species X) --
-  that algorithm is the open follow-up for the perfect phase.
+  Naive species mode plateaued at 4/9 here (see git history / docs/
+  perfect_combine_design.md). The wired serial-imprint handler preserves species
+  purity and imprints the donor's alleles into X, reaching NEAR-perfect (>= 8/9)
+  -- a large gain over naive. The final trait is a convergence tail: the pure
+  pool experiment reaches 9/9 via random-pairing diversity that the deterministic
+  one-pair-per-apiary hardware loop lacks; closing it needs pairing diversity /
+  complementarity selection (documented follow-up). This asserts the strong
+  progress that holds.
 --]]
 
 package.path = package.path .. ";./?.lua"
@@ -30,16 +28,17 @@ local Sim = require("bee_keeper_sim")
 
 local TARGET = "Diligent"   -- the species to make perfect
 local DONOR_SP = "Ended"    -- the max bee's (arbitrary) species
-local traits = Cfg.activeTraits(); traits[#traits + 1] = "species"
+local coverable = Cfg.activeTraits()
+local traits = {}; for _, t in ipairs(coverable) do traits[#traits + 1] = t end; traits[#traits + 1] = "species"
 
 local config = require("bee_keeper_manager_config")
-config.mutationGraph = nil
-config.genebank = nil
-config.program = nil
-config.templates = nil
+config.mutationGraph = nil; config.genebank = nil; config.program = nil; config.templates = nil
 config.sites = {}
 local pos = { { x = 4, z = 3 }, { x = -3, z = 6 }, { x = 8, z = -5 } }
-for i = 1, 3 do config.sites[i] = { name = "apiary" .. i, x = pos[i].x, z = pos[i].z, mode = "species", targetSpecies = TARGET } end
+for i = 1, 3 do
+  config.sites[i] = { name = "apiary" .. i, x = pos[i].x, z = pos[i].z,
+    mode = "perfect", targetSpecies = TARGET, perfectTraits = coverable }
+end
 config.storagePos = { x = -6, z = -6 }
 config.trashPos = { x = -8, z = -8 }
 config.chargerPos = { x = 0, z = 0 }
@@ -47,36 +46,26 @@ config.workingSlots = {}; for s = 2, 32 do config.workingSlots[#config.workingSl
 
 Sim.install(config, config.sites, { cargoSize = 32, storageSize = 512 })
 
--- Replace the auto-seeded (already-perfect) species population with a CONTROLLED
--- one: X purebred but all-BAD traits, plus a stack of all-GOOD donor drones of a
--- different species. The only good alleles come from the donor.
+-- Controlled starting population: X purebred but all-BAD traits, plus a renewable
+-- stack of all-GOOD donor drones/princesses of a different species -- the only
+-- good-allele source. Placed in CARGO (the perfect handler's pool is cargo).
 for _, slot in ipairs(config.workingSlots) do
   local st = Sim.world.drone.inventory[slot]
   if st and st.individual then Sim.world.drone.inventory[slot] = nil end
 end
 Sim.world.storage = {}
-
 local function xBad(kind) return Sim.toStack(Sim.makeStartingRaw(traits, TARGET), kind, true) end
-local function donor(kind) return Sim.toStack(Sim.makeGoodRaw(traits, DONOR_SP), kind, true) end
-
--- X princesses (the line to purify) + all-good donor drones, in cargo and storage.
+local function donor(kind) local s = Sim.toStack(Sim.makeGoodRaw(traits, DONOR_SP), kind, true); return s end
 local ci = 2
 local function putCargo(stack) Sim.world.drone.inventory[config.workingSlots[ci]] = stack; ci = ci + 1 end
-for _ = 1, 3 do putCargo(xBad("princess")) end
-for _ = 1, 3 do putCargo(donor("drone")) end
-local si = 1
-local function putStore(stack) Sim.world.storage[si] = stack; si = si + 1 end
-for _ = 1, 20 do putStore(xBad("princess")) end
-for _ = 1, 20 do putStore(donor("drone")) end
--- a few good donor princesses too, so the line has a good-allele mother source
-for _ = 1, 6 do putStore(donor("princess")) end
+for _ = 1, 6 do putCargo(xBad("princess")) end
+for _ = 1, 6 do putCargo(donor("drone")) end
+for _ = 1, 2 do putCargo(donor("princess")) end
 
 local M = require("bee_keeper_manager")
 local Nav = require("bee_keeper_nav")
 Nav.setHome(70)
 
-local coverable = Cfg.activeTraits()
--- Best count of good traits among X-pure bees anywhere in the world.
 local function bestXPureGood()
   local best = -1
   local function scan(stack)
@@ -100,18 +89,43 @@ end
 
 check("no perfect-X bee at start (donor is a different species; X is all-bad)", bestXPureGood() <= 0)
 
+-- Keep the donor supply renewable in cargo (the perfect phase assumes a renewable
+-- max-donor bank; here we top it up directly since there's no genebank running).
+local function topUpDonorsInCargo()
+  local dd, dp = 0, 0
+  local free = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local st = Sim.world.drone.inventory[slot]
+    if st and st.individual and Cfg.speciesKey(st.individual.active.species) == DONOR_SP then
+      local isGoodAll = true
+      for _, t in ipairs(coverable) do
+        if not Cfg.isGoodValue(t, st.individual.active[t]) then isGoodAll = false break end
+      end
+      if isGoodAll then if st.name:find("Drone") then dd = dd + 1 else dp = dp + 1 end end
+    elseif not st then free[#free + 1] = slot end
+  end
+  local fi = 1
+  while dd < 4 and fi <= #free do Sim.world.drone.inventory[free[fi]] = donor("drone"); fi = fi + 1; dd = dd + 1 end
+  while dp < 1 and fi <= #free do Sim.world.drone.inventory[free[fi]] = donor("princess"); fi = fi + 1; dp = dp + 1 end
+end
+
+local NEAR = #coverable - 1 -- near-perfect target (the tail trait is a follow-up)
 local realprint = print; _G.print = function() end
-for _ = 1, 400 do M.runCycle(config) end
+local reachedAt
+for c = 1, 1500 do
+  topUpDonorsInCargo()
+  M.runCycle(config)
+  if bestXPureGood() >= NEAR then reachedAt = c; break end
+end
 _G.print = realprint
 
 local reached = bestXPureGood()
--- The donor's alleles DO get bred into species-pure X (real progress) -- proving
--- the perfect-phase wiring reaches and uses the max donor. Full 9/9 convergence
--- is the documented open problem (see the header); assert the progress, not it.
-check("perfect phase imbues donor alleles into species-pure " .. TARGET .. " (progress > 0)",
-  reached >= 1, "best X-pure good = " .. reached .. "/" .. #coverable)
-realprint(string.format("  (best species-pure %s reached %d/%d good traits in 400 cycles -- naive species-mode plateau; see header)",
-  TARGET, reached, #coverable))
+check("perfect phase imprints the donor's alleles into species-pure " .. TARGET ..
+  " -- near-perfect (>= " .. NEAR .. "/" .. #coverable .. ", well past the naive 4/9 plateau)",
+  reached >= NEAR, "best X-pure good = " .. reached .. "/" .. #coverable ..
+    (reachedAt and (" at cycle " .. reachedAt) or " (not reached in 1500)"))
+realprint(string.format("  (serial-imprint perfect phase: reached %d/%d%s; final trait is the documented convergence tail)",
+  reached, #coverable, reachedAt and (" at cycle " .. reachedAt) or ""))
 
 print("")
 if failures == 0 then print("ALL TESTS PASSED")

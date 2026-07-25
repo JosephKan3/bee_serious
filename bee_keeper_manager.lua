@@ -85,6 +85,7 @@ local Rainbow = require("bee_rainbow")
 local Traitmax = require("bee_traitmax")
 local Templates = require("bee_templates")
 local Program = require("bee_program")
+local Combine = require("bee_combine")
 
 local M = {}
 M.Nav = Nav
@@ -316,6 +317,146 @@ local function ensureSingleItemSlot(config, slot)
     end
   end
   return nil
+end
+
+-- ============================================================
+-- Perfect phase (bee_combine): serial trait imprinting
+-- ============================================================
+--
+-- Breeds a species-X-pure bee that ALSO carries the maxed allele set, using the
+-- traitmax MAX bee (a foreign species, all good) as the good-allele donor. Naive
+-- species mode plateaus (species purity vs trait-fixing tension); bee_combine's
+-- serial imprinting + partial-credit allele scoring converges (see
+-- docs/perfect_combine_design.md). This handler is the hardware wiring of that
+-- pure planner: pick the best PRINCESS and best DRONE by the current working-stage
+-- fitness (role-aware, since a mating needs one of each), breed them, and let the
+-- offspring accumulate the fixed loci over visits.
+
+-- Adapter: a manager individual (active[locus]/inactive[locus]) -> the bee_combine
+-- genome shape (g.species.{active,inactive}, g[trait].{active,inactive}).
+local function toCombineGenome(ind, traitOrder)
+  local g = { species = { active = ind.active.species, inactive = ind.inactive.species } }
+  for _, t in ipairs(traitOrder) do
+    g[t] = { active = ind.active[t], inactive = ind.inactive[t] }
+  end
+  return g
+end
+
+-- Combine pool from cargo: every analyzed bee as a bee_combine genome tagged with
+-- its cargo slot and role.
+local function gatherCombinePool(config, traitOrder)
+  local pool = {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind then
+      local g = toCombineGenome(ind, traitOrder)
+      g._slot = slot
+      g._princess = isPrincessOrQueenStack(stack)
+      pool[#pool + 1] = g
+    end
+  end
+  return pool
+end
+
+local function combineOpts(site)
+  return {
+    target = site.targetSpecies,
+    traitOrder = site.perfectTraits or {},
+    isGood = Cfg.isGoodValue,
+    speciesKey = Cfg.speciesKey,
+  }
+end
+
+function M.runPerfectSite(config, site)
+  local opts = combineOpts(site)
+  if not site.targetSpecies or #opts.traitOrder == 0 then
+    return "perfect_no_target_or_traits"
+  end
+  Status.setStep("Heading to " .. (site.name or "?") .. " (perfect " .. site.targetSpecies .. ")")
+  if not gotoSite(site) then return "nav_failed_to_apiary" end
+  local down = sides().down
+
+  -- Finish/collect any in-progress mating first (same pattern as runQualitySite):
+  -- getBeeProgress completes the attempt on its final tick; if the queen is gone,
+  -- harvest+analyze the offspring so they join the pool for this same decision.
+  if beekeeper().canWork(down) then
+    local progress = beekeeper().getBeeProgress(down)
+    if M.readSideSlot(down, 1) ~= nil then
+      return string.format("perfecting %s (%.0f%%)", site.targetSpecies, progress)
+    end
+    M.harvestSite(config, site)
+    M.analyzeWorkingSlots(config)
+  end
+
+  local pool = gatherCombinePool(config, opts.traitOrder)
+  if Combine.isDone(pool, opts) then
+    -- A perfect bee is in cargo -- deposit to storage so the program's completion
+    -- scan sees this species as perfected and rotates to the next.
+    M.syncBanksToStorage(config)
+    return "perfected:" .. site.targetSpecies
+  end
+
+  -- SPECIES-AWARE pair selection (serial imprint on real hardware, one pair at a
+  -- time). A naive best-by-fitness pick erodes species purity -- it breeds the
+  -- foreign donor into the princess line and never recovers X. Instead:
+  --   * If NO X-carrier yet has the working trait's good allele -> INTRODUCE it:
+  --     an X-carrier princess x the donor drone (offspring: X-hybrid carrying it,
+  --     already-fixed traits preserved since the donor is good on them too).
+  --   * Once X-carriers carry it -> HOMOZYGIZE within species X: breed the two
+  --     best X-carriers so offspring recover X-pure AND fix the trait.
+  -- xAlleles*BIG keeps species purity dominant over trait fitness in the pick.
+  local order, tgt = opts.traitOrder, opts.target
+  local stage = Combine.stage(pool, opts)
+  local working = math.min(stage + 1, #order)
+  local wt = order[working]
+  local BIG = 100
+  local function xAlleles(g)
+    local n = 0
+    if Cfg.speciesKey(g.species.active) == tgt then n = n + 1 end
+    if Cfg.speciesKey(g.species.inactive) == tgt then n = n + 1 end
+    return n
+  end
+  local function goodW(g) return opts.isGood(wt, g[wt].active) or opts.isGood(wt, g[wt].inactive) end
+  local function fit(g) return Combine.correctAlleles(g, working, opts) end
+  -- FITNESS-dominant with species as a tiebreak: a hybrid CARRYING the working
+  -- trait's good allele must outrank an X-pure bee LACKING it, or the allele can
+  -- never enter the X-pure line (species weight must not dominate fitness). x is
+  -- only a tiebreak between equally-fit bees (prefer the purer one).
+  local function xFit(g) return fit(g) * BIG + xAlleles(g) end
+  local function pickBest(princess, filter, scoreFn)
+    local best, bs
+    for _, g in ipairs(pool) do
+      if g._princess == princess and filter(g) then
+        local s = scoreFn(g)
+        if not best or s > bs then best, bs = g, s end
+      end
+    end
+    return best
+  end
+  -- Princess protects the species line (prefer X-carriers, then fitness). Drone
+  -- ALWAYS carries the working trait's good allele (goodW dominates), preferring
+  -- an X-carrier that has it once one exists (so offspring can be X-pure + fixed),
+  -- else the foreign donor (to keep introducing it). goodW's BIG2 outranks the
+  -- species term so the trait keeps flowing in; the species term then favors
+  -- X-carrier good-w drones over the donor as they appear.
+  local BIG2 = BIG * BIG
+  local function droneScore(g) return (goodW(g) and BIG2 or 0) + xFit(g) end
+  local anyTrue = function() return true end
+  local bestP = pickBest(true, function(g) return xAlleles(g) >= 1 end, xFit) or pickBest(true, anyTrue, fit)
+  local bestD = pickBest(false, anyTrue, droneScore)
+  if not bestP then return "perfect_need_princess:restock" end
+  if not bestD then return "perfect_need_drone:restock" end
+  local bestPs, bestDs = fit(bestP), fit(bestD)
+
+  agent().select(bestP._slot)
+  if not beekeeper().swapQueen(down) then return "swap_queen_failed" end
+  local dSlot = ensureSingleItemSlot(config, bestD._slot)
+  if not dSlot then return "cargo_full_cannot_split_drone_stack" end
+  agent().select(dSlot)
+  if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
+  return string.format("imprinting %s trait %d/%d (P%.0f x D%.0f)",
+    site.targetSpecies, working, #opts.traitOrder, bestPs, bestDs)
 end
 
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
@@ -1831,8 +1972,9 @@ local function perfectTarget(config, scan)
 end
 
 -- Evaluate the active program phase: if its goal is met, advance. Returns
---   (phaseMode, targetSpecies) -- targetSpecies is set only for the perfect
--- phase (the species being perfected this cycle). nil phaseMode -> program done.
+--   (phaseMode, targetSpecies, coverableTraits) -- targetSpecies + coverable are
+-- set only for the perfect phase (the species being perfected this cycle and the
+-- trait set to imprint). nil phaseMode -> program done.
 function M.evaluateProgram(config)
   local prog = config.program
   if not prog then return nil end
@@ -1855,7 +1997,7 @@ function M.evaluateProgram(config)
     -- Recompute a target if we just entered the perfect phase.
     if phase == "perfect" then target = perfectTarget(config, scan) end
   end
-  return phase, target
+  return phase, target, scan.coverable
 end
 
 -- ============================================================
@@ -1913,15 +2055,16 @@ function M.runCycle(config)
   -- cycle before any site is visited (it does one storage scan; see
   -- M.scanStorageForProgram -- a candidate to throttle if trips get costly).
   if config.program then
-    local phaseMode, target = M.evaluateProgram(config)
+    local phaseMode, target, coverable = M.evaluateProgram(config)
     if phaseMode then
-      -- The "perfect" phase runs SPECIES mode toward the current target species
-      -- (breeding the maxed allele set from the traitmax bee into each banked
-      -- species, one at a time); other phases map directly to a site mode.
-      local siteMode = (phaseMode == "perfect") and "species" or phaseMode
+      -- The "perfect" phase runs the bee_combine serial-imprint handler toward the
+      -- current target species (M.runPerfectSite); other phases map to a site mode.
       for _, s in ipairs(config.sites) do
-        s.mode = siteMode
-        if phaseMode == "perfect" then s.targetSpecies = target end
+        s.mode = phaseMode
+        if phaseMode == "perfect" then
+          s.targetSpecies = target
+          s.perfectTraits = coverable
+        end
       end
       table.insert(log, string.format("[program] phase: %s%s (%d left)",
         phaseMode, target and (" -> " .. target) or "", Program.remaining(config.program)))
@@ -1965,6 +2108,8 @@ function M.runCycle(config)
       end
     elseif site.mode == "species" then
       status = M.runQualitySite(config, site)
+    elseif site.mode == "perfect" then
+      status = M.runPerfectSite(config, site)
     elseif site.mode == "mutation" or site.mode == "rainbow" then
       status = M.runMutationSite(config, site)
     else
