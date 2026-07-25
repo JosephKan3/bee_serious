@@ -114,9 +114,12 @@ local function main(args)
   -- site's tree planner. Only bother if something actually needs it, and
   -- treat a missing/unreadable dump as non-fatal -- mutation sites will
   -- just report they have no graph rather than crashing the whole run.
-  local needsGraph = false
+  local needsGraph, needsTemplates = false, false
   for _, s in ipairs(config.sites) do
-    if s.mode == "mutation" then needsGraph = true end
+    -- mutation/rainbow plan breeding trees over the graph; traitmax uses it too
+    -- (Phase A acquires donor species), plus the allele templates (which donors).
+    if s.mode == "mutation" or s.mode == "rainbow" or s.mode == "traitmax" then needsGraph = true end
+    if s.mode == "traitmax" then needsTemplates = true end
   end
   if needsGraph then
     local graph, err = M.loadMutationGraph(config)
@@ -126,7 +129,18 @@ local function main(args)
       print(string.format("Loaded mutation graph: %d producible species.", n))
     else
       print("WARNING: could not load bee_mutations.dat (" .. tostring(err) ..
-        ") -- mutation sites cannot plan breeding trees until it's present.")
+        ") -- mutation/rainbow/traitmax sites cannot plan breeding trees until it's present.")
+    end
+  end
+  if needsTemplates then
+    local tmpl, err = M.loadTemplates(config)
+    if tmpl then
+      local n = 0
+      for _ in pairs(tmpl) do n = n + 1 end
+      print(string.format("Loaded allele templates: %d species (traitmax donor data).", n))
+    else
+      print("WARNING: could not load bee_templates.dat (" .. tostring(err) ..
+        ") -- traitmax runs as plain quality breeding (no mutation-acquired donors).")
     end
   end
 

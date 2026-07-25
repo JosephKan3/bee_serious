@@ -54,6 +54,10 @@ end
 -- Rainbow is the genebank scheduler cycling its target through every species
 -- reachable from the seeded base leaves -- it always needs the bank machinery.
 if mode == "rainbow" then genebankMode = true end
+-- Traitmax-via-mutation (the "genebank" arg on a traitmax run): Phase A acquires
+-- donor species via the scheduler, then Phase B combines their alleles. Needs
+-- the graph, templates, and bank machinery -- same infrastructure as rainbow.
+local traitmaxViaMutation = (mode == "traitmax" and genebankMode)
 if mode == "species" then targetSpecies = targetSpecies or "Sticky"
 elseif mode == "mutation" then targetSpecies = targetSpecies or "Common" end
 
@@ -68,7 +72,7 @@ local config = require("bee_keeper_manager_config")
 -- Meadows drone) reachable from the sim's seeded mutation-site stock;
 -- pass a deeper target as arg 3 to exercise a multi-step tree.
 local mutationGraph = nil
-if mode == "mutation" or mode == "rainbow" then
+if mode == "mutation" or mode == "rainbow" or traitmaxViaMutation then
   local f = io.open("bee_mutations.dat", "r")
   if f then
     local ok, g = pcall(MG.parse, f:read("*a"))
@@ -116,6 +120,7 @@ end
 -- graph, empty starting stock) -- handed to the sim so it seeds exactly
 -- those, letting a multi-step target breed to completion headlessly.
 local mutationLeaves = nil
+local simTemplates = nil
 if mode == "rainbow" then
   -- Rainbow has no single target -- seed a small base pool and let it build every
   -- species reachable from it. (In real use this is your pristine breeder stock.)
@@ -124,6 +129,32 @@ if mode == "rainbow" then
   local held = {}; for _, l in ipairs(mutationLeaves) do held[l] = true end
   local n = 0; for _ in pairs(R.targetSet(mutationGraph, held)) do n = n + 1 end
   print("Rainbow mode: building all " .. n .. " species reachable from " .. table.concat(mutationLeaves, ", "))
+elseif traitmaxViaMutation and mutationGraph then
+  -- Traitmax Phase A: seed a base pool, load templates, and let bee_traitmax.plan
+  -- decide which donor species to acquire. config.templates drives the manager;
+  -- simTemplates (live-display-name-keyed raw values) drives the sim so a mutation
+  -- injects the result species' default template alleles (how good alleles enter).
+  -- 3 leaves keep the per-leaf base reserve (8 princesses + a drone stack each)
+  -- inside a 32-slot cargo; enough species reachable to exercise several donors.
+  mutationLeaves = { "Forest", "Wintry", "Meadows" }
+  local R = require("bee_rainbow")
+  local Templates = require("bee_templates")
+  local Cfg = require("bee_trait_config")
+  local TM = require("bee_traitmax")
+  local held = {}; for _, l in ipairs(mutationLeaves) do held[l] = true end
+  local parsed = Templates.load("bee_templates.dat")
+  config.templates = parsed
+  config.genebank = config.genebank or {}
+  -- Reachable species for the sim's template injection.
+  local reachable = R.targetSet(mutationGraph, held)
+  for l in pairs(held) do reachable[l] = true end
+  simTemplates = Templates.build(parsed, reachable)
+  local plan = TM.plan(mutationGraph, held, parsed, Cfg.activeTraits(), Cfg.isGoodValue)
+  print("Traitmax-via-mutation: " .. #plan.donors .. " donor(s) to acquire from " ..
+    table.concat(mutationLeaves, ", ") .. " -> " .. table.concat(plan.donors, ", "))
+  if #plan.uncoverable > 0 then
+    print("  uncoverable traits (no reachable donor): " .. table.concat(plan.uncoverable, ", "))
+  end
 elseif mutationGraph then
   local plan = MG.planBreedingTree(mutationGraph, {}, targetSpecies)
   if plan.reachable then
@@ -166,6 +197,8 @@ Sim.install(config, config.sites, {
   mutationBoost = genebankMode and 4 or 1,
   cargoSize = genebankMode and 32 or nil,        -- a 32-slot robot
   storageSize = genebankMode and 512 or nil,     -- a large storage bank
+  templates = simTemplates,                      -- traitmax: mutation injects template alleles
+  traitmaxViaMutation = traitmaxViaMutation,     -- skip all-good seeding; leaves are the whole pool
 })
 
 local M = require("bee_keeper_manager")

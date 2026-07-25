@@ -243,6 +243,29 @@ local function makeStartingRaw(traitList, speciesName)
   return g
 end
 
+-- Builds a purebred genotype from a species' DEFAULT TEMPLATE: its allele
+-- overrides (from `templates`, the same map applyMutation uses) laid over the
+-- Forestry base default. This is what a real freshly-obtained bee of a species
+-- actually has -- so an owned base leaf that happens to be a good donor for some
+-- trait genuinely carries that good allele, matching bee_traitmax's donor logic
+-- (without this, a leaf is seeded all-bad and its donor credit is a phantom).
+local function makeTemplateRaw(traitList, speciesName, templates)
+  local dg = AlleleValues.defaultGenome(templates and templates[speciesName])
+  local g = {}
+  for _, trait in ipairs(traitList) do
+    if trait == "species" then
+      local sp = { name = speciesName, uid = "sim." .. speciesName:lower(), humidity = "Normal", temperature = "Normal" }
+      g[trait] = { active = sp, inactive = sp }
+    else
+      local v = dg[trait]
+      if v == nil then v = 0 end
+      g[trait] = { active = v, inactive = v }
+    end
+  end
+  return g
+end
+M.makeTemplateRaw = makeTemplateRaw
+
 -- Builds a raw genotype starting from makeStartingRaw's all-bad
 -- baseline, but with good alleles swapped in for ONLY the traits in
 -- goodTraitSet ({ trait = true, ... }) -- used for the "hard" seeding
@@ -603,7 +626,13 @@ function M.newWorld(config, sites, opts)
     nextStorageSlot = nextStorageSlot + 1
   end
 
-  if opts.hard then
+  if opts.traitmaxViaMutation then
+    -- TRAITMAX-VIA-MUTATION: the premise is that good alleles do NOT exist in
+    -- starting stock -- they're introduced ONLY by mutating to a donor species
+    -- whose default template carries them (Phase A). So seed NO all-good general
+    -- population here; the base LEAF bees seeded below (all "bad" alleles until a
+    -- mutation injects a template) are the entire starting genome pool.
+  elseif opts.hard then
     -- HARD scenario: no single starting bee already has every trait
     -- fixed. Every quality trait's good allele DOES exist somewhere in
     -- the starting population (otherwise purebred would be literally
@@ -670,7 +699,8 @@ function M.newWorld(config, sites, opts)
   -- population's own 7, well past the usual 15 available).
   local seededSpecies = {}
   for _, s in ipairs(sites) do
-    if (s.mode == "mutation" or s.mode == "rainbow")
+    if (s.mode == "mutation" or s.mode == "rainbow"
+        or (s.mode == "traitmax" and opts.mutationLeaves))
       and not seededSpecies["mut:" .. tostring(s.targetSpecies)] then
       seededSpecies["mut:" .. tostring(s.targetSpecies)] = true
       -- Seed the BASE LEAF bees the target's breeding tree actually needs
@@ -701,15 +731,22 @@ function M.newWorld(config, sites, opts)
         -- even for a deep tree. A few more sit in storage as a restock backup.
         local LEAF_CARGO_PRINCESSES = 8
         local LEAF_STORE_PRINCESSES = 60
+        -- A leaf carries its species' DEFAULT TEMPLATE alleles when templates are
+        -- supplied (traitmax-via-mutation), so an owned leaf that is a donor
+        -- genuinely has its good allele; else the classic all-bad starting stock.
+        local function leafGeno(leaf)
+          if opts.templates then return makeTemplateRaw(traitList, leaf, opts.templates) end
+          return makeStartingRaw(traitList, leaf)
+        end
         for _, leaf in ipairs(leaves) do
           for _ = 1, LEAF_CARGO_PRINCESSES do
-            put(makeStartingRaw(traitList, leaf), "princess")
+            put(leafGeno(leaf), "princess")
           end
-          put(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
+          put(leafGeno(leaf), "drone", LEAF_DRONE_STACK)
           for _ = 1, LEAF_STORE_PRINCESSES do
-            putStorage(makeStartingRaw(traitList, leaf), "princess")
+            putStorage(leafGeno(leaf), "princess")
           end
-          putStorage(makeStartingRaw(traitList, leaf), "drone", LEAF_DRONE_STACK)
+          putStorage(leafGeno(leaf), "drone", LEAF_DRONE_STACK)
         end
       else
         put(makeStartingRaw(traitList, "Forest"), "princess")
