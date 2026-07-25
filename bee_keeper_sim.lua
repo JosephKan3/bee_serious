@@ -366,6 +366,7 @@ local function toStack(rawGenotype, kind, isAnalyzed)
   elseif kind == "drone" then name = "Forestry:beeDroneGE" end
   return { name = name, size = 1, maxSize = 64, individual = toIndividual(rawGenotype, isAnalyzed), _uid = rawGenotype._uid }
 end
+M.toStack = toStack
 
 -- Inverse of toIndividual -- extracts a raw genotype (active/inactive per
 -- trait) back out of an individual table. Used when the production code

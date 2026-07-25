@@ -84,6 +84,7 @@ local Sched = require("bee_genebank_scheduler")
 local Rainbow = require("bee_rainbow")
 local Traitmax = require("bee_traitmax")
 local Templates = require("bee_templates")
+local Program = require("bee_program")
 
 local M = {}
 M.Nav = Nav
@@ -1738,6 +1739,89 @@ function M.loadTemplates(config, path)
 end
 
 -- ============================================================
+-- Global program phases (bee_program.lua): a PROGRAM sequences phases across the
+-- WHOLE apiary array (traitmax -> rainbow -> ...), advancing when a phase's goal
+-- is met. Opt-in: set config.program = Program.new(phases) (M.initProgram). While
+-- a program is active it dictates every site's mode this cycle.
+-- ============================================================
+
+-- Initialize the program state from config.programPhases (or the default), once.
+function M.initProgram(config)
+  config.program = config.program or Program.new(config.programPhases)
+  return config.program
+end
+
+-- The COVERABLE target traits given the species reachable from the leaves we
+-- currently hold -- the best allele set traitmax can achieve (the rest are
+-- uncoverable: no reachable species carries a good allele for them).
+local function coverableTraits(config, ownedLeaves)
+  local plan = Traitmax.plan(config.mutationGraph, ownedLeaves, config.templates or {},
+    Cfg.activeTraits(), Cfg.isGoodValue)
+  local unc = {}; for _, t in ipairs(plan.uncoverable) do unc[t] = true end
+  local cov = {}
+  for _, t in ipairs(Cfg.activeTraits()) do if not unc[t] then cov[#cov + 1] = t end end
+  return cov
+end
+
+-- One storage pass for program-phase evaluation (navigates to storage): the
+-- species summary (for rainbow's all-banked check) plus whether some stored bee
+-- is homozygous-good on EVERY coverable trait (traitmax's max-allele-set goal).
+function M.scanStorageForProgram(config)
+  local down = sides().down
+  local out = { summary = {}, maxBeeReached = false }
+  if not config.storagePos or not config.mutationGraph then return out end
+  if not Nav.gotoXZ(config.storagePos.x, config.storagePos.z) then return out end
+  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+  local genomes = {}
+  for s = 1, size do
+    local stack = invCtrl().getStackInSlot(down, s)
+    local c = classifyBee(stack)
+    if c then
+      local rec = out.summary[c.species] or { purePrincesses = 0, pureDrones = 0 }
+      out.summary[c.species] = rec
+      if c.pure and c.role == "princess" then rec.purePrincesses = rec.purePrincesses + c.size
+      elseif c.pure and c.role == "drone" then rec.pureDrones = rec.pureDrones + c.size end
+      genomes[#genomes + 1] = readIndividual(stack)
+    end
+  end
+  local ownedLeaves = {}
+  for sp in pairs(out.summary) do
+    if (config.mutationGraph.leaves or {})[sp] then ownedLeaves[sp] = true end
+  end
+  local cov = coverableTraits(config, ownedLeaves)
+  if #cov > 0 then
+    for _, ind in ipairs(genomes) do
+      local allGG = true
+      for _, t in ipairs(cov) do
+        if not (Cfg.isGoodValue(t, ind.active[t]) and Cfg.isGoodValue(t, ind.inactive[t])) then
+          allGG = false; break
+        end
+      end
+      if allGG then out.maxBeeReached = true; break end
+    end
+  end
+  return out
+end
+
+-- Evaluate the active program phase: if its goal is met, advance. Returns the
+-- mode every site should run this cycle (nil when no program / program done).
+function M.evaluateProgram(config)
+  local prog = config.program
+  if not prog then return nil end
+  local phase = Program.current(prog)
+  if not phase then return nil end
+  local scan = M.scanStorageForProgram(config)
+  local complete = false
+  if phase == "traitmax" then
+    complete = scan.maxBeeReached
+  elseif phase == "rainbow" then
+    complete = (rainbowTarget(config, scan.summary) == nil)
+  end
+  if complete then phase = Program.advance(prog) end
+  return phase
+end
+
+-- ============================================================
 -- Main cycle
 -- ============================================================
 
@@ -1782,6 +1866,22 @@ function M.runCycle(config)
         config.honeyCount = countHoneyInCargo()
         print("[restock-diag] proactive restock succeeded, honeyCount now " .. config.honeyCount)
       end
+    end
+  end
+
+  -- GLOBAL PROGRAM: if one is configured, advance it when the current phase's
+  -- goal is met and run EVERY site in the active phase's mode this cycle. The
+  -- program spans the whole apiary array (traitmax -> rainbow -> ...); when it
+  -- finishes, sites fall back to their own configured mode. Evaluated once per
+  -- cycle before any site is visited (it does one storage scan; see
+  -- M.scanStorageForProgram -- a candidate to throttle if trips get costly).
+  if config.program then
+    local phaseMode = M.evaluateProgram(config)
+    if phaseMode then
+      for _, s in ipairs(config.sites) do s.mode = phaseMode end
+      table.insert(log, string.format("[program] phase: %s (%d left)", phaseMode, Program.remaining(config.program)))
+    else
+      table.insert(log, "[program] complete")
     end
   end
 
