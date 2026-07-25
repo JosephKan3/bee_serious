@@ -97,6 +97,7 @@ function Updater:downloadFiles()
     "bee_genebank.lua",
     "bee_genebank_scheduler.lua",
     "bee_rainbow.lua",
+    "bee_traitmax_mutation.lua",
     "bee_storage.lua",
     "updater.lua",
     "version.lua",
