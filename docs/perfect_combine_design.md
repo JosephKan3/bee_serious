@@ -48,7 +48,48 @@ stays all-good). It supplies the good alleles that species-X drones lack.
 Validated in `scripts/` experiments (crossRaw-level): serial imprint reached
 9/9 X-pure by trait 6 of 9; all-at-once variants reached 0/9–4/9.
 
-## Implementation plan (next)
+## Wired (v0.5.0) -- reaches 8/9, one-trait tail remains
+
+`M.runPerfectSite` drives the perfect phase with `bee_combine`. Two scoring rules
+were essential (found by debugging the wiring):
+1. **Fitness must dominate species purity.** A first cut weighted `xAlleles*100`
+   so an X-pure bee always outranked an X-hybrid -- even one carrying the good
+   allele the X line still lacked -- so the allele could never enter the pure
+   line (stuck with flowerProvider bad). Fix: `fit*BIG + xAlleles` (species is a
+   tiebreak only).
+2. **The drone must always carry the working trait** (donor early, X-carriers
+   once they have it) so the trait keeps flowing in while the princess protects
+   the species line.
+
+Result over the real manager+sim (foreign all-good donor into X-all-bad):
+species-pure X, homozygous-good on **8/9** traits by ~cycle 15 (vs naive 4/9
+plateau). The last trait is a **convergence TAIL** -- and it's a BREEDING-LOOP
+DYNAMICS problem, not a scoring tweak. Characterized failure modes (all observed):
+
+1. **Cargo saturation freezes the pool.** Each mating yields 1 princess but
+   several drones, so cargo fills with drones. Once full, offspring princesses
+   can't land -> the princess pool dwindles to ZERO -> `perfect_need_princess`
+   -> the pool goes dead-flat for 1000+ cycles at ~stage 6-7 even though the
+   world already holds the X-pure + working-trait carriers needed to finish.
+2. **Naive pruning over-protects.** "Discard low-fit but never a working-trait
+   carrier" backfires when the working trait is COMMON (the all-good donor
+   spreads e.g. nocturnal widely) -- almost every bee is a carrier, nothing gets
+   discarded, cargo stays full.
+3. **Deterministic single-pair pick** -> all apiaries breed the identical mating
+   each cycle (no exploration). Randomized top-K pairing ALONE (without fixing
+   saturation) regressed to 7/9 -- noise without turnover.
+4. **Scoring must stay fitness-dominant** (species only a tiebreak) or a good
+   allele can never enter the X-pure line -- confirmed (an `xAlleles*100` species
+   weight stalled/diverged; a first best-by-fitness cut diverged to -1).
+
+What a full 9/9 fix needs (cohesive, not incremental patches): a bounded,
+ROLE-BALANCED, EVOLVING pool -- e.g. keep a fixed small cargo pool (top ~6
+princesses + ~8 drones by fitness, hard total cap) with only a FEW working-trait
+carriers retained (not all), storage as overflow + restock so genes aren't lost,
+and randomized top-K pairing. The princess/drone production imbalance is the core
+tension to manage. This is a self-contained subsystem worth its own focused pass.
+
+## Implementation plan (original / remaining)
 
 - `bee_combine.lua` (pure): the serial-imprint planner. Given the current pool
   (genotypes), the target species, the coverable trait order, and `isGood`,
