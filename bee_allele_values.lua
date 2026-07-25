@@ -78,4 +78,27 @@ function M.templateToRaw(traits)
   return out
 end
 
+-- Forestry base bee default template (RAW values) -- the genome a freshly
+-- mutated species has for any chromosome its own template does NOT override.
+-- Every value here is intentionally "bad" for all bee_trait_config targets,
+-- which is correct: a default bee is only good at the traits its species
+-- explicitly overrides. (Standard Forestry base: slowest/normal-fertility/
+-- shorter-life/slowest-flowering/no-tolerance/all-false/vanilla-flowers.)
+M.BASE_DEFAULT = {
+  speed = 0.3, fertility = 2, lifespan = 20, flowering = 5,
+  temperatureTolerance = "NONE", humidityTolerance = "NONE",
+  nocturnal = false, tolerantFlyer = false, caveDwelling = false,
+  flowerProvider = "flowersVanilla",
+}
+
+-- The full default genome (raw values) of a species: its template overrides
+-- laid over BASE_DEFAULT. templateRaw is one entry of bee_templates.build()
+-- (raw-valued, may be nil for a species with no overrides -> pure base).
+function M.defaultGenome(templateRaw)
+  local g = {}
+  for k, v in pairs(M.BASE_DEFAULT) do g[k] = v end
+  for k, v in pairs(templateRaw or {}) do g[k] = v end
+  return g
+end
+
 return M

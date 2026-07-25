@@ -22,6 +22,7 @@
 
 local BB = require("bee_breeding")
 local Cfg = require("bee_trait_config")
+local AlleleValues = require("bee_allele_values")
 
 local M = {}
 
@@ -178,6 +179,28 @@ local function crossRaw(traitList, parentA, parentB)
   child._natural = parentA._natural
   return child
 end
+
+-- Apply a successful MUTATION to `child`: set its species purebred to
+-- resultName and, when a template map is supplied, replace every tracked trait
+-- with the result species' DEFAULT template allele (its overrides laid over the
+-- base default). This models real Forestry: a mutation yields a purebred default
+-- bee of the result species -- which is how a good allele ENTERS the pool -- not
+-- a Mendelian blend of the parents. templates is display-name-keyed raw values
+-- (bee_templates.build()); nil -> only the species locus changes. Returns child.
+local function applyMutation(child, resultName, templates, traitList)
+  local sp = { name = resultName, uid = "sim." .. resultName:lower(), humidity = "Normal", temperature = "Normal" }
+  child.species = { active = sp, inactive = sp }
+  if templates then
+    local dg = AlleleValues.defaultGenome(templates[resultName])
+    for _, trait in ipairs(traitList or {}) do
+      if trait ~= "species" and dg[trait] ~= nil then
+        child[trait] = { active = dg[trait], inactive = dg[trait] }
+      end
+    end
+  end
+  return child
+end
+M.applyMutation = applyMutation
 
 -- Builds a raw genotype where every trait is set to its "good" target
 -- (from bee_trait_config.lua) or, for traits marked "any", a plausible
@@ -501,6 +524,12 @@ function M.newWorld(config, sites, opts)
     -- purebred x purebred cross reliably yields the mutation instead of burning
     -- many princesses at the base ~8-15% rate. Default 1 (no frames).
     mutationBoost = opts.mutationBoost or 1,
+
+    -- Species DEFAULT allele templates (display-name-keyed, RAW values), from
+    -- bee_templates.build(). When present, a successful mutation seeds the
+    -- offspring's alleles from the result species' template instead of leaving
+    -- them Mendelian -- see makeOffspring. nil -> mutations only set species.
+    templates = opts.templates,
   }
 
   -- Directional pair index for mutation rolls: "<princessSpecies>|<droneSpecies>"
@@ -1036,8 +1065,12 @@ function M.install(config, sites, opts)
               for _, recipe in ipairs(recipes) do
                 local boosted = math.min(100, (recipe.chance or 0) * (world.mutationBoost or 1))
                 if world.conditionsMet(recipe.conditions) and math.random(100) <= boosted then
-                  local sp = { name = recipe.result, uid = "sim." .. recipe.result:lower(), humidity = "Normal", temperature = "Normal" }
-                  child.species = { active = sp, inactive = sp }
+                  -- Mutation succeeded: the offspring becomes a purebred default
+                  -- bee of the result species, its alleles drawn from that
+                  -- species' template (how good alleles enter the pool). In
+                  -- species/mutation/rainbow modes the traitList is species-only,
+                  -- so only the species locus changes there. See applyMutation.
+                  applyMutation(child, recipe.result, world.templates, world.traitList)
                   break
                 end
               end

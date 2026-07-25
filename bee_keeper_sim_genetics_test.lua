@@ -83,6 +83,45 @@ do
     g.species.active.name == "Common" and g.species.inactive.name == "Common")
 end
 
+-- ============================================================
+-- applyMutation: a mutation yields a purebred DEFAULT bee of the result
+-- species -- its good alleles come from the TEMPLATE, not the parents.
+-- ============================================================
+
+do
+  local traitList = { "species", "fertility", "lifespan", "nocturnal" }
+  -- A hybrid parent-blend child whose traits are all "bad" (base-ish) values.
+  local child = {
+    species = { active = { name = "Forest" }, inactive = { name = "Meadows" } },
+    fertility = { active = 2, inactive = 1 },
+    lifespan = { active = 40, inactive = 60 },
+    nocturnal = { active = false, inactive = false },
+  }
+  -- Template map: the result species "Ended" is a donor for fertility+nocturnal.
+  local templates = { Ended = { fertility = 4, nocturnal = true } }
+  Sim.applyMutation(child, "Ended", templates, traitList)
+
+  check("applyMutation sets species purebred to the result",
+    child.species.active.name == "Ended" and child.species.inactive.name == "Ended")
+  check("applyMutation injects the template's good fertility (active+inactive)",
+    child.fertility.active == 4 and child.fertility.inactive == 4)
+  check("applyMutation injects the template's good nocturnal",
+    child.nocturnal.active == true and child.nocturnal.inactive == true)
+  check("applyMutation fills non-override traits from the base default (lifespan 20)",
+    child.lifespan.active == 20 and child.lifespan.inactive == 20,
+    "got " .. tostring(child.lifespan.active))
+end
+
+do
+  -- Without templates, applyMutation only changes the species locus (backward
+  -- compatible with mutation/rainbow modes).
+  local child = { species = { active = { name = "A" }, inactive = { name = "B" } },
+                  fertility = { active = 1, inactive = 1 } }
+  Sim.applyMutation(child, "Common", nil, { "species", "fertility" })
+  check("applyMutation without templates leaves non-species traits untouched",
+    child.species.active.name == "Common" and child.fertility.active == 1)
+end
+
 print("")
 if failures == 0 then
   print("ALL TESTS PASSED")
