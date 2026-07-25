@@ -82,6 +82,8 @@ local MG = require("bee_mutation_graph")
 local GB = require("bee_genebank")
 local Sched = require("bee_genebank_scheduler")
 local Rainbow = require("bee_rainbow")
+local Traitmax = require("bee_traitmax")
+local Templates = require("bee_templates")
 
 local M = {}
 M.Nav = Nav
@@ -939,6 +941,37 @@ local function rainbowTarget(config, summary)
     Rainbow.remaining(banked, targetSet)
 end
 
+-- TRAITMAX Phase A: the next DONOR species to bank a purebred of. The donor set
+-- is chosen so the donors' default templates collectively supply a good allele
+-- for every coverable target trait (bee_traitmax.plan). nil when every donor is
+-- banked -> Phase A done, the site moves to the combine phase. Also returns the
+-- plan (for surfacing uncoverable traits to the user).
+local function traitmaxTarget(config, summary)
+  local graph = config.mutationGraph
+  local ownedLeaves, banked = {}, {}
+  for sp, s in pairs(summary) do
+    if (graph.leaves or {})[sp] then ownedLeaves[sp] = true end
+    if (s.purePrincesses or 0) >= 1 then banked[sp] = true end
+  end
+  local plan = Traitmax.plan(graph, ownedLeaves, config.templates or {},
+    Cfg.activeTraits(), Cfg.isGoodValue, banked)
+  local target = Traitmax.nextDonor(graph, ownedLeaves, banked, plan.donorSet)
+  return target, Traitmax.remaining(plan.donorSet, banked), plan
+end
+
+-- Whether a traitmax site is still in Phase A (acquiring donor species). True
+-- only when traitmax-via-mutation is fully enabled (genebank + mutation graph +
+-- templates all loaded) AND the site hasn't already finished acquiring. Once
+-- runGenebankSchedule banks the last donor it sets site.traitmaxPhase="combine",
+-- pinning the site into Phase B for the rest of the run. With any piece missing,
+-- returns false -> the site is plain quality breeding (backward compatible).
+function M.traitmaxAcquiring(config, site)
+  if site.traitmaxPhase == "combine" then return false end
+  return config.genebank ~= nil
+    and config.mutationGraph ~= nil
+    and config.templates ~= nil
+end
+
 -- One genebank-scheduled decision+action for a mutation OR rainbow site: sync
 -- banks to storage, choose the target (fixed for mutation, next-unbanked for
 -- rainbow), ask the scheduler for the next job, fetch its parents, and breed them.
@@ -949,6 +982,17 @@ function M.runGenebankSchedule(config, site)
   if site.mode == "rainbow" then
     target, remaining = rainbowTarget(config, summary)
     if not target then return "rainbow_complete" end
+  elseif site.mode == "traitmax" then
+    -- Phase A: acquire the donor species. When they're all banked, signal the
+    -- dispatcher to flip the site into its combine phase (runQualitySite).
+    local plan
+    target, remaining, plan = traitmaxTarget(config, summary)
+    if not target then
+      site.traitmaxPhase = "combine"
+      local unc = (plan and #plan.uncoverable > 0)
+        and (" (uncoverable: " .. table.concat(plan.uncoverable, ", ") .. ")") or ""
+      return "traitmax_donors_banked:combine" .. unc
+    end
   end
 
   local state, plan = M.buildSchedulerState(config, site, summary, convertible, target)
@@ -957,10 +1001,12 @@ function M.runGenebankSchedule(config, site)
     -- Rainbow's target is always an UNBANKED species, so the scheduler only
     -- returns done for a single-target mutation site; rainbow re-picks next visit.
     if site.mode == "rainbow" then return "rainbow_banked:" .. target end
+    if site.mode == "traitmax" then return "traitmax_donor_banked:" .. target end
     return "mutation_succeeded:switch_site_to_species_mode"
   end
   if job.type == "blocked" then
-    return (site.mode == "rainbow" and ("[rainbow " .. tostring(remaining) .. " left] ") or "")
+    local tag = (site.mode == "rainbow" and "rainbow") or (site.mode == "traitmax" and "traitmax") or nil
+    return (tag and ("[" .. tag .. " " .. tostring(remaining) .. " left] ") or "")
       .. "blocked:" .. tostring(job.need)
   end
 
@@ -1678,6 +1724,19 @@ function M.loadMutationGraph(config, path)
   return graph
 end
 
+-- Species DEFAULT allele templates for traitmax-via-mutation: parsed from the
+-- mod sources into bee_templates.dat (see docs/data_sources.md), loaded into
+-- config.templates (Java-enum-keyed raw form; bee_traitmax.plan reconciles to
+-- live names). Only needed by traitmax sites; a missing file is non-fatal (they
+-- then have no donors and report "traitmax_no_templates"). Called once at
+-- startup from bee_keeper_manager_run.lua.
+function M.loadTemplates(config, path)
+  local parsed = Templates.load(path or "bee_templates.dat")
+  if not parsed then return nil, "not_found" end
+  config.templates = parsed
+  return parsed
+end
+
 -- ============================================================
 -- Main cycle
 -- ============================================================
@@ -1746,7 +1805,19 @@ function M.runCycle(config)
 
     local status
     if site.mode == "traitmax" then
-      status = M.runQualitySite(config, site)
+      -- Traitmax-via-mutation runs in TWO phases (see bee_traitmax.lua). Phase
+      -- A "acquire": bank the donor species (whose default templates carry the
+      -- good alleles) via the genebank scheduler -- the same path rainbow uses.
+      -- Once every donor is banked, runGenebankSchedule sets site.traitmaxPhase
+      -- = "combine" and the site falls through to Phase B: the existing quality
+      -- breeding, which concentrates the now-available good alleles into one
+      -- max bee (species-agnostic). Without templates/graph/genebank, traitmax
+      -- is just plain quality breeding, exactly as before.
+      if M.traitmaxAcquiring(config, site) then
+        status = M.runMutationSite(config, site)
+      else
+        status = M.runQualitySite(config, site)
+      end
     elseif site.mode == "species" then
       status = M.runQualitySite(config, site)
     elseif site.mode == "mutation" or site.mode == "rainbow" then
