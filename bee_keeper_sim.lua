@@ -1251,7 +1251,21 @@ function M.install(config, sites, opts)
           -- to select the princess -- see bee_breeding_test.lua's header
           -- on that mechanic. All computed before princessRaw is cleared,
           -- so they all descend from the same parents.
-          local newPrincess = makeOffspring()
+          -- INHERITANCE HOOKS (trace validation): a mating produces an ordered
+          -- offspring list -- [1] = replacement princess, [2..] = drones. Normally
+          -- each is a fresh random M.mate draw. But when world.importBirths is set
+          -- (sim replaying a Minecraft trace), it supplies the EXACT offspring
+          -- genomes Minecraft rolled for this apiary, so the sim's inheritance
+          -- tracks the real run instead of diverging on RNG. world.recordBirths (if
+          -- set) captures whatever was produced, for the trace exporter. Both take
+          -- the apiary key so births are matched per-apiary in mating order (FIFO).
+          local apiaryKey = world.drone.x .. ":" .. world.drone.z
+          local offspring = world.importBirths and world.importBirths(apiaryKey)
+          if not offspring then
+            offspring = { makeOffspring(), makeOffspring(), makeOffspring() }
+          end
+          if world.recordBirths then world.recordBirths(apiaryKey, offspring) end
+          local newPrincess = offspring[1]
 
           -- Output area is slots 6-12 (7 slots) -- 1-2 are princess/drone,
           -- 3-5 are frames. Tries to merge into an existing matching
@@ -1281,8 +1295,8 @@ function M.install(config, sites, opts)
           -- reveal a newly bred individual's traits until you identify
           -- it with honey (see the analyze() implementation below).
           addProduct(toStack(newPrincess, "princess", false))
-          for _ = 1, 2 do
-            addProduct(toStack(makeOffspring(), "drone", false))
+          for i = 2, #offspring do
+            addProduct(toStack(offspring[i], "drone", false))
           end
 
           a.princessRaw = nil

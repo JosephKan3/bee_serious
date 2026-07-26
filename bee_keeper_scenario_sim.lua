@@ -37,9 +37,17 @@
 local args = { ... }
 local autoRun = false
 local cycles = 40
-for _, a in ipairs(args) do
-  if a == "run" then autoRun = true
-  elseif tonumber(a) then cycles = tonumber(a) end
+local tracePath, replayPath
+do
+  local i = 1
+  while i <= #args do
+    local a = args[i]
+    if a == "run" then autoRun = true
+    elseif a == "trace" then i = i + 1; tracePath = args[i]        -- EXPORT a trace
+    elseif a == "replay" then i = i + 1; replayPath = args[i]; autoRun = true -- IMPORT+VALIDATE
+    elseif tonumber(a) then cycles = tonumber(a) end
+    i = i + 1
+  end
 end
 
 -- ============================================================
@@ -288,25 +296,174 @@ local function containersSignature()
   return table.concat(parts)
 end
 
+-- ============================================================
+-- 5. TRACE: export state per step, and/or replay a Minecraft trace to import
+--    inheritance RNG + validate every other piece of state. (See bee_trace.lua.)
+-- ============================================================
+local T = require("bee_trace")
+local curCycle = 0
+
+-- raw genotype (sim internal: trait -> {active,inactive}, species nested {name})
+-- <-> flat trace beeRec (trait -> value, species reduced to name).
+local function rawToRec(raw, kind)
+  local rec = { kind = kind, analyzed = false, size = 1, active = {}, inactive = {} }
+  for trait, pair in pairs(raw) do
+    if trait ~= "_uid" and trait ~= "_natural" and type(pair) == "table" then
+      local av, iv = pair.active, pair.inactive
+      if trait == "species" then av = av and av.name; iv = iv and iv.name end
+      rec.active[trait] = av; rec.inactive[trait] = iv
+    end
+  end
+  return rec
+end
+local function recToRaw(rec)
+  local raw = { _natural = true }
+  for trait, av in pairs(rec.active) do
+    local iv = rec.inactive[trait]
+    if trait == "species" then
+      raw.species = { active = { name = av }, inactive = { name = iv } }
+    else
+      raw[trait] = { active = av, inactive = iv }
+    end
+  end
+  return raw
+end
+
+local function apiaryKeyOver()
+  for _, s in ipairs(sites) do
+    if world.drone.x == s.x and world.drone.z == s.z then return s.x .. ":" .. s.z end
+  end
+  return nil
+end
+
+-- Snapshot the OBSERVABLE state (what real hardware could also record): robot
+-- pos + selected slot, cargo genomes, and -- when over an apiary -- that apiary's
+-- queen/drone/output. `matings` = offspring produced this step (per mating).
+local function captureSnapshot(matings)
+  local snap = { cycle = curCycle, step = Status.get().step,
+    pos = { x = world.drone.x, z = world.drone.z },
+    sel = world.drone._selected or false, cargo = {} }
+  for slot, st in pairs(world.drone.inventory) do
+    local rec = T.beeRecord(st)
+    if rec then snap.cargo[slot] = rec end
+  end
+  local ak = apiaryKeyOver()
+  if ak then
+    local a = world.apiaries[ak]
+    snap.apiary = { key = ak,
+      queen = a.princessRaw and rawToRec(a.princessRaw, "princess") or nil,
+      drone = a.droneRaw and rawToRec(a.droneRaw, "drone") or nil, out = {} }
+    for pslot, st in pairs(a.products or {}) do
+      local rec = T.beeRecord(st); if rec then snap.apiary.out[pslot] = rec end
+    end
+  end
+  if matings and #matings > 0 then snap.births = matings end
+  return snap
+end
+
+-- EXPORT: record each mating's offspring for the trace, accumulated until the
+-- next snapshot is written.
+local writer, pendingMatings = nil, {}
+if tracePath then
+  writer = T.writer(io.open, tracePath)
+  world.recordBirths = function(key, offspring)
+    local recs = {}
+    for idx, raw in ipairs(offspring) do recs[idx] = rawToRec(raw, idx == 1 and "princess" or "drone") end
+    pendingMatings[#pendingMatings + 1] = { key = key, recs = recs }
+  end
+end
+
+-- REPLAY: import inheritance from a trace + validate. Build a per-apiary FIFO
+-- queue of the offspring Minecraft produced; the sim pops from it (in mating
+-- order) instead of rolling its own RNG. Everything else is diffed per step.
+local traceSnaps, replayIdx, birthQueues, divergences = nil, 0, {}, 0
+if replayPath then
+  traceSnaps = assert(T.read(io.open, replayPath))
+  for _, s in ipairs(traceSnaps) do
+    for _, m in ipairs(s.births or {}) do
+      birthQueues[m.key] = birthQueues[m.key] or {}
+      table.insert(birthQueues[m.key], m.recs)
+    end
+  end
+  world.importBirths = function(key)
+    local q = birthQueues[key]
+    if not q or #q == 0 then return nil end -- ran dry -> sim mated more than MC (a divergence)
+    local recs = table.remove(q, 1)
+    local raws = {}
+    for i, rec in ipairs(recs) do raws[i] = recToRaw(rec) end
+    return raws
+  end
+end
+
+-- Diff two snapshots; returns human-readable differences (ignoring imported
+-- inheritance, which by construction matches). A non-empty result = the sim's
+-- LOGIC disagrees with the recorded Minecraft run at this step.
+local function diffSnapshots(sim, mc)
+  local diffs = {}
+  if not mc then diffs[#diffs + 1] = "no matching Minecraft step (sim ran longer)"; return diffs end
+  if sim.pos.x ~= mc.pos.x or sim.pos.z ~= mc.pos.z then
+    diffs[#diffs + 1] = string.format("pos sim(%d,%d) vs mc(%d,%d)", sim.pos.x, sim.pos.z, mc.pos.x, mc.pos.z)
+  end
+  local function cmpBees(where, a, b)
+    local slots = {}
+    for k in pairs(a or {}) do slots[k] = true end
+    for k in pairs(b or {}) do slots[k] = true end
+    for k in pairs(slots) do
+      local sa, sb = T.genomeSig((a or {})[k]), T.genomeSig((b or {})[k])
+      if sa ~= sb then diffs[#diffs + 1] = string.format("%s slot %s: sim[%s] vs mc[%s]", where, tostring(k), sa, sb) end
+    end
+  end
+  cmpBees("cargo", sim.cargo, mc.cargo)
+  if (sim.apiary and sim.apiary.key) ~= (mc.apiary and mc.apiary.key) then
+    diffs[#diffs + 1] = string.format("apiary sim[%s] vs mc[%s]",
+      sim.apiary and sim.apiary.key or "-", mc.apiary and mc.apiary.key or "-")
+  elseif sim.apiary then
+    cmpBees("apiary.out", sim.apiary.out, mc.apiary.out)
+    if T.genomeSig(sim.apiary.queen) ~= T.genomeSig(mc.apiary.queen) then diffs[#diffs + 1] = "apiary queen genome" end
+    if T.genomeSig(sim.apiary.drone) ~= T.genomeSig(mc.apiary.drone) then diffs[#diffs + 1] = "apiary drone genome" end
+  end
+  return diffs
+end
+
 local lastSig = nil
 Status.onChange = function()
   local sig = containersSignature()
   if sig == lastSig then return end -- no container change -> view persists, no prompt
   lastSig = sig
+  local matings = pendingMatings; pendingMatings = {}
   printContainers()
+  local snap = captureSnapshot(matings)
+  if writer then writer.step(snap) end
+  if traceSnaps then
+    replayIdx = replayIdx + 1
+    local diffs = diffSnapshots(snap, traceSnaps[replayIdx])
+    if #diffs > 0 then
+      divergences = divergences + #diffs
+      print(string.format("  !! DIVERGENCE at step %d (%s):", replayIdx, snap.step))
+      for _, d in ipairs(diffs) do print("     - " .. d) end
+    end
+  end
   prompt()
 end
 
 print("Scenario sim: 4 ApChests, 2 apiaries, drawer+trash+charger; seeding Forest/Meadows base stock.")
-print(string.format("Goal: mutation -> Common at both apiaries. %s, up to %d cycles.\n",
-  autoRun and "auto-run" or "STEP MODE", cycles))
+print(string.format("Goal: mutation -> Common at both apiaries. %s, up to %d cycles.%s%s\n",
+  autoRun and "auto-run" or "STEP MODE", cycles,
+  tracePath and ("\nEXPORTING trace -> " .. tracePath) or "",
+  replayPath and ("\nREPLAYING+VALIDATING trace <- " .. replayPath) or ""))
 printContainers()
 prompt()
 
 for cycle = 1, cycles do
+  curCycle = cycle
   print(string.format("\n########## CYCLE %d ##########", cycle))
   local log = M.runCycle(config)
   for _, l in ipairs(log) do print("  " .. l) end
 end
 
+if writer then writer.close(); print("\nTrace written to " .. tracePath) end
+if traceSnaps then
+  print(string.format("\nVALIDATION: %d step(s) checked, %d divergence(s)%s.",
+    replayIdx, divergences, divergences == 0 and " -- sim matches Minecraft" or " -- see !! lines above"))
+end
 print("\nDone.")
