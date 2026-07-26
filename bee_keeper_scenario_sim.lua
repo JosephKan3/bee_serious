@@ -155,9 +155,20 @@ end
 -- ============================================================
 local Nav = require("bee_keeper_nav")
 local Status = require("bee_keeper_status")
+local UI = require("bee_keeper_ui")
+local AV = require("bee_allele_values")
 Nav.setHome(70)
 
-local ALLELE_COLS = { "fertility", "speed", "lifespan" } -- compact allele summary
+-- Every trait shown in the detailed view (species is handled separately), in a
+-- stable display order, each with a short column label.
+local TRAIT_DISPLAY = {
+  { t = "fertility", label = "fert" }, { t = "speed", label = "spd" },
+  { t = "lifespan", label = "life" }, { t = "flowering", label = "flwr" },
+  { t = "temperatureTolerance", label = "tempT" }, { t = "humidityTolerance", label = "humT" },
+  { t = "nocturnal", label = "noct" }, { t = "tolerantFlyer", label = "fly" },
+  { t = "caveDwelling", label = "cave" }, { t = "flowerProvider", label = "flower" },
+  { t = "effect", label = "fx" }, { t = "territory", label = "terr" },
+}
 
 local function kindOf(stack)
   if not stack or not stack.name then return "?" end
@@ -169,7 +180,10 @@ local function kindOf(stack)
   return stack.name
 end
 
--- One compact line describing a slot's stack: "s3  Drone x64  Forest/Meadows  fert 3/2 spd .3/.3 life 30/40"
+-- Describe a slot's stack: a header line (slot, kind, count, species active/
+-- inactive) plus, for an analyzed bee, a continuation line listing EVERY trait
+-- with its alleles resolved to readable names ("life shorter/normal", not
+-- "life 20/40"). Returns a possibly-multiline string.
 local function describeStack(slotLabel, stack)
   if not stack then return string.format("  %-4s (empty)", slotLabel) end
   local ind = stack.individual
@@ -179,17 +193,21 @@ local function describeStack(slotLabel, stack)
   local sp = string.format("%s/%s",
     ind.active.species and ind.active.species.name or "?",
     ind.inactive.species and ind.inactive.species.name or "?")
+  local flags = ind.isAnalyzed and "" or " (UNANALYZED)"
+  local header = string.format("  %-4s %-8s x%-2d %-18s%s",
+    slotLabel, kindOf(stack), stack.size or 1, sp, flags)
+
   local alleles = {}
-  for _, t in ipairs(ALLELE_COLS) do
-    local a, b = ind.active[t], ind.inactive[t]
+  for _, d in ipairs(TRAIT_DISPLAY) do
+    local a = ind.active[d.t]
     if a ~= nil then
-      local short = ({ fertility = "fert", speed = "spd", lifespan = "life" })[t] or t
-      alleles[#alleles + 1] = string.format("%s %s/%s", short, tostring(a), tostring(b))
+      local b = ind.inactive[d.t]
+      alleles[#alleles + 1] = string.format("%s %s/%s",
+        d.label, AV.toName(d.t, a), AV.toName(d.t, b))
     end
   end
-  local flags = ind.isAnalyzed and "" or " (UNANALYZED)"
-  return string.format("  %-4s %-8s x%-2d %-18s %s%s",
-    slotLabel, kindOf(stack), stack.size or 1, sp, table.concat(alleles, "  "), flags)
+  if #alleles == 0 then return header end
+  return header .. "\n        " .. table.concat(alleles, "  ")
 end
 
 -- Live view of a bee-storage chest by position (reads world.storages).
@@ -213,6 +231,14 @@ local function printContainers()
     Status.get().step, world.drone.x, world.drone.z, (world.drone.energy or 0) * 100,
     tostring(world.drone._selected)))
   line(string.rep("=", 72))
+
+  -- Same grid/map the real `bee_keeper_manager_run ui` draws, rendered as plain
+  -- text on top of the detailed container view (colors dropped -- console sim).
+  local extras = { chargerPos = config.chargerPos, storagePos = config.storagePos, trashPos = config.trashPos }
+  local rows = UI.renderBuffer(sites, { x = world.drone.x, z = world.drone.z }, extras,
+    Status.get(), world.drone.energy, 72, 16, M.listCargo(config), nil)
+  for _, r in ipairs(rows) do line((r:gsub("%s+$", ""))) end
+  line(string.rep("-", 72))
 
   -- ApChests (containers)
   for i, pos in ipairs(AP_CHESTS) do

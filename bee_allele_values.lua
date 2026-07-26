@@ -56,6 +56,42 @@ local function flowerRaw(v)
   return "flowers" .. v:sub(1, 1):upper() .. v:sub(2)
 end
 
+-- ---- reverse: raw genome value -> readable name (for display) -------------
+-- Invert a name->value scale into value->name, skipping the "norm" alias so a
+-- shared value (e.g. speed 1.0) resolves to the canonical name ("normal").
+local function invert(map)
+  local inv = {}
+  for name, val in pairs(map) do
+    if name ~= "norm" then inv[val] = name end
+  end
+  return inv
+end
+local NAME = {
+  speed = invert(M.speed), fertility = invert(M.fertility),
+  flowering = invert(M.flowering), lifespan = invert(M.lifespan),
+}
+
+-- Turn a RAW genome value back into a short readable name for a trait, the
+-- inverse of M.toRaw -- so a UI can show lifespan 20 as "shorter", speed 0.3
+-- as "slowest", "BOTH_5" as "both5", "flowersVanilla" as "vanilla", instead of
+-- raw enum values. Unknown values pass through as tostring().
+function M.toName(trait, raw)
+  if raw == nil then return "?" end
+  local numeric = NAME[trait]
+  if numeric then return numeric[raw] or tostring(raw) end
+  if BOOL[trait] then return (raw == true or raw == "true") and "yes" or "no" end
+  if trait == "temperatureTolerance" or trait == "humidityTolerance" then
+    if type(raw) == "string" then return (raw:gsub("_", "")):lower() end
+    return tostring(raw)
+  end
+  if trait == "flowerProvider" and type(raw) == "string" then
+    local s = raw:gsub("^flowers", "")
+    if s == "" then return raw end
+    return s:sub(1, 1):lower() .. s:sub(2)
+  end
+  return tostring(raw)
+end
+
 -- Convert one normalized template value for `trait` to its raw genome value.
 -- Unknown traits (effect/territory/species) pass through unchanged -- they are
 -- "any" in bee_trait_config, so the raw form doesn't matter to isGoodValue.
