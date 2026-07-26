@@ -85,8 +85,36 @@ local function main(args)
   local config = require("bee_keeper_manager_config")
 
   local uiEnabled = false
+  local stepEnabled = false
   for _, a in ipairs(args) do
     if a == "ui" then uiEnabled = true end
+    if a == "step" then stepEnabled = true end
+  end
+
+  -- STEP MODE (bee_keeper_manager_run step): pause before every TASK so real
+  -- hardware can be single-stepped in lockstep with the local simulator, to
+  -- validate the sim matches Minecraft action-for-action. The hook is on
+  -- Status.onChange -- a whole task boundary ("walk to apiary2", "harvest",
+  -- "load drone") -- NOT bee_keeper_nav's per-block Nav.onStep, so a multi-block
+  -- flight advances to its destination in ONE step (no prompt per block moved),
+  -- exactly as requested. Starts paused; (s)tep does one task, (r)esume runs
+  -- free, (q)uit exits. Reads from the OC terminal via io.read (OpenOS).
+  local stepControl = stepEnabled and "paused" or "running"
+  local function checkStep()
+    if not stepEnabled or stepControl ~= "paused" then return end
+    while true do
+      io.write(string.format("\n[step] next: %s -- (s)tep, (r)esume, (q)uit > ", Status.get().step))
+      local cmd = (io.read() or "q"):lower()
+      if cmd == "" or cmd == "s" or cmd == "step" then
+        break
+      elseif cmd == "r" or cmd == "resume" then
+        stepControl = "running"; break
+      elseif cmd == "q" or cmd == "quit" then
+        print("Quitting."); os.exit(0)
+      else
+        print("Unknown command: " .. tostring(cmd))
+      end
+    end
   end
 
   Nav.setHome(nil) -- locks flight altitude to wherever the drone currently is
@@ -167,11 +195,19 @@ local function main(args)
     Status.onChange = function()
       local ok, chargePercent = pcall(function() return computer.energy() / computer.maxEnergy() end)
       UI.draw(config.sites, Nav.getPos(), extras, Status.get(), ok and chargePercent or nil, M.listCargo(config), nil)
+      checkStep() -- pause after drawing this task's frame (no-op unless step mode)
     end
     Status.setStep("Starting up")
   else
     print(string.format("Managing %d apiary site(s)%s.", #config.sites,
       config.storagePos and (string.format(", storage at (%d,%d)", config.storagePos.x, config.storagePos.z)) or " (no storage location known)"))
+    if stepEnabled then
+      -- No dashboard: print each task then prompt to single-step it.
+      Status.onChange = function()
+        print("  [" .. Status.get().step .. "]")
+        checkStep()
+      end
+    end
   end
 
   while true do
