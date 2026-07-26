@@ -14,6 +14,18 @@
   the drone thinks the world looks like and what it's doing right now,
   side by side with what it's actually doing in-game.
 
+  Other args (combinable):
+    trace <dir>  export a per-task state trace to <dir>/bee_trace.dat, which
+                 bee_keeper_scenario_sim replays to import inheritance +
+                 validate every action offline.
+    slow [secs]  sleep at every task boundary (default 1.5s) so you can WATCH
+                 the robot pace in-game. Use this instead of `step` on a robot.
+    step         single-step at each task via keyboard prompts. ONLY works on a
+                 machine with a keyboard (Computer/tablet terminal), NOT a
+                 headless robot -- a robot has no keyboard, so io.read never
+                 blocks and it just runs straight through. Validate a robot run
+                 offline with `trace` + the sim's `replay` instead.
+
   LOGGING: every print() (from this file or anything it requires) is also
   appended to bee_keeper.log in the current directory, and any uncaught
   error is caught and logged with a full traceback before the script
@@ -87,6 +99,7 @@ local function main(args)
   local uiEnabled = false
   local stepEnabled = false
   local traceDir = nil
+  local slowDelay = nil
   for i, a in ipairs(args) do
     if a == "ui" then uiEnabled = true end
     if a == "step" then stepEnabled = true end
@@ -95,6 +108,12 @@ local function main(args)
     -- PARENT DIRECTORY (e.g. the robot's home dir), not a full file path --
     -- bee_trace drops bee_trace.dat inside it.
     if a == "trace" then traceDir = args[i + 1] or "." end
+    -- `slow [seconds]`: sleep this long at every task boundary so you can WATCH
+    -- the robot pace through its actions in-game. This is the robot-friendly
+    -- alternative to `step`: an OC ROBOT has no keyboard, so io.read never
+    -- blocks (it returns an empty line immediately) and interactive stepping
+    -- can't actually pause -- a timed delay can. Default 1.5s.
+    if a == "slow" then slowDelay = tonumber(args[i + 1]) or 1.5 end
   end
 
   -- STEP MODE (bee_keeper_manager_run step): pause before every TASK so real
@@ -102,9 +121,14 @@ local function main(args)
   -- validate the sim matches Minecraft action-for-action. The hook is on
   -- Status.onChange -- a whole task boundary ("walk to apiary2", "harvest",
   -- "load drone") -- NOT bee_keeper_nav's per-block Nav.onStep, so a multi-block
-  -- flight advances to its destination in ONE step (no prompt per block moved),
-  -- exactly as requested. Starts paused; (s)tep does one task, (r)esume runs
-  -- free, (q)uit exits. Reads from the OC terminal via io.read (OpenOS).
+  -- flight advances to its destination in ONE step (no prompt per block moved).
+  -- Starts paused; (s)tep does one task, (r)esume runs free, (q)uit exits.
+  --
+  -- CAVEAT: this only works on a machine with a KEYBOARD (an OC Computer/tablet
+  -- terminal). On a headless ROBOT there is no keyboard, so io.read returns an
+  -- empty line immediately and every prompt auto-advances -- use `slow` (timed
+  -- pacing) to watch a robot, and validate action-for-action OFFLINE by exporting
+  -- a `trace` and replaying it in bee_keeper_scenario_sim.
   local stepControl = stepEnabled and "paused" or "running"
   local function checkStep()
     if not stepEnabled or stepControl ~= "paused" then return end
@@ -121,6 +145,13 @@ local function main(args)
         print("Unknown command: " .. tostring(cmd))
       end
     end
+  end
+
+  -- Pace a task boundary: single-step prompt (keyboard machines) and/or a timed
+  -- delay (robots). Called wherever the UI/plain onChange handlers finish a frame.
+  local function pace()
+    checkStep()
+    if slowDelay then os.sleep(slowDelay) end
   end
 
   Nav.setHome(nil) -- locks flight altitude to wherever the drone currently is
@@ -272,19 +303,19 @@ local function main(args)
       local ok, chargePercent = pcall(function() return computer.energy() / computer.maxEnergy() end)
       UI.draw(config.sites, Nav.getPos(), extras, Status.get(), ok and chargePercent or nil, M.listCargo(config), nil)
       captureAndWrite() -- record this task's state to the trace (no-op unless tracing)
-      checkStep() -- pause after drawing this task's frame (no-op unless step mode)
+      pace() -- pause after drawing this task's frame (step prompt and/or slow delay)
     end
     Status.setStep("Starting up")
   else
     print(string.format("Managing %d apiary site(s)%s.", #config.sites,
       config.storagePos and (string.format(", storage at (%d,%d)", config.storagePos.x, config.storagePos.z)) or " (no storage location known)"))
-    if stepEnabled or traceDir then
-      -- No dashboard: print each task, record it to the trace, then (in step
-      -- mode) prompt to single-step it.
+    if stepEnabled or traceDir or slowDelay then
+      -- No dashboard: print each task, record it to the trace, then pace it
+      -- (step prompt on a keyboard machine and/or a slow delay).
       Status.onChange = function()
         print("  [" .. Status.get().step .. "]")
         captureAndWrite()
-        checkStep()
+        pace()
       end
     end
   end
