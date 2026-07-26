@@ -1344,20 +1344,51 @@ end
 -- Loads the job's two parents from cargo into the apiary and breeds them. Selects
 -- the SPECIFIC princess/drone the job wants (by species/allele) out of whatever
 -- resident working set cargo currently holds.
+-- Which species a job is ultimately building toward -- so parent selection can
+-- score candidates by how close they are to that pure target genome.
+local function jobTargetSpecies(job)
+  return job.species or job.to or job.result
+end
+
 local function executeJobAtApiary(config, site, job)
   local down = sides().down
   local spec = jobParentSpec(job)
   if not spec then return "unknown_job_type" end
-  local pSlot, dSlot
+
+  -- GREEDY, FERTILITY-AWARE parent selection (the user's rule: breed the parent
+  -- matching the most target slots -- species AND stats -- not the first found).
+  -- Among the resident candidates that satisfy the job's role spec, pick the
+  -- princess closest to the pure target genome, then the drone that best
+  -- COMPLEMENTS her (bee_breeding.selectBestDrone), with species weighted high
+  -- so consolidation never trades away species purity for a stat. Reuses the
+  -- same scoring the quality phase uses, so a mutated species is solidified
+  -- with good fertility instead of converging to a pure-but-fertility-1 dead bee.
+  local tgt = jobTargetSpecies(job)
+  local traitList = M.traitListFor(site.mode)
+  local princesses, drones = {}, {}
   for _, cslot in ipairs(config.workingSlots) do
     if cslot ~= config.honeySlot then
-      local bee = classifyBee(invCtrl().getStackInInternalSlot(cslot))
-      if bee then
-        if not pSlot and bee.role == "princess" and princessMatches(bee, spec) then pSlot = cslot end
-        if not dSlot and bee.role == "drone" and droneMatches(bee, spec) then dSlot = cslot end
+      local stack = invCtrl().getStackInInternalSlot(cslot)
+      local bee = classifyBee(stack)
+      local ind = bee and readIndividual(stack)
+      if bee and ind then
+        local genotype = Cfg.normalizeGenotype(traitList, ind.active, ind.inactive, tgt)
+        if bee.role == "princess" and princessMatches(bee, spec) then
+          princesses[#princesses + 1] = { _slot = cslot, genotype = genotype }
+        elseif bee.role == "drone" and droneMatches(bee, spec) then
+          drones[#drones + 1] = { id = "slot" .. cslot, _slot = cslot, genotype = genotype }
+        end
       end
     end
   end
+  if #princesses == 0 or #drones == 0 then return "job_parents_missing_in_cargo" end
+
+  table.sort(princesses, function(a, b)
+    return M.purityOf(traitList, a.genotype) > M.purityOf(traitList, b.genotype)
+  end)
+  local pSlot = princesses[1]._slot
+  local bestDrone = BB.selectBestDrone(traitList, princesses[1].genotype, drones, false, { species = 100 })
+  local dSlot = bestDrone and bestDrone._slot
   if not pSlot or not dSlot then return "job_parents_missing_in_cargo" end
 
   agent().select(pSlot)
