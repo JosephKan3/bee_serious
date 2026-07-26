@@ -1022,83 +1022,78 @@ local function classifyBee(stack)
   return { species = a, role = role, pure = (a == i), alleles = { [a] = true, [i] = true }, size = stack.size or 1 }
 end
 
--- Travels to storage, deposits every bee currently in cargo into it (merging
--- matching drone stacks), then scans storage. Leaves the robot AT storage so a
--- fetch can immediately follow. Returns:
+-- Deposits every bee currently in cargo into the STORAGE NETWORK (all
+-- config.storagePositions, spilling store to store), then scans the WHOLE network
+-- for the genebank census. Leaves the robot at the last store visited. Returns:
 --   summary     = { [species] = { purePrincesses, pureDrones } }
 --   convertible = { [species] = <# pristine hybrid princesses carrying that allele> }
 --   slotsByKey  = fetch index: "P:<sp>" pure princess, "D:<sp>" pure drone,
---                 "V:<sp>" hybrid vessel carrying <sp> -> { storageSlot, ... }
+--                 "V:<sp>" hybrid vessel carrying <sp> -> { {pos=<storeIndex>, slot}, ... }
 function M.syncBanksToStorage(config)
-  local down = sides().down
-  if not config.storagePos then return {}, {}, {} end
-  if not Nav.gotoXZ(config.storagePos.x, config.storagePos.z) then return {}, {}, {} end
-  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+  if #M.storagePositions(config) == 0 then return {}, {}, {} end
 
-  -- 1. Deposit every cargo bee into storage. All bee items share one name, so a
-  -- same-name slot might still be a genetically different bee -- dropIntoSlot only
-  -- merges a real genotype match (returns true) and otherwise leaves the stack
-  -- untouched, so we TRY each same-name not-full slot and fall back to the first
-  -- empty. Without this, a Wintry drone "merged" into a Forest-drone slot silently
-  -- failed and stayed stranded in cargo (invisible to the scheduler in storage).
+  -- 1. Deposit every cargo bee into the network. dropIntoSlot only merges a real
+  -- genotype match (bee items all share one name), else takes an empty slot --
+  -- handled by findStackingSlot inside depositBeesAcrossStores. If the whole
+  -- network is full, halt+beep rather than strand bees (M.onStorageFull).
+  local entries = {}
   for _, cslot in ipairs(config.workingSlots) do
-    local stack = invCtrl().getStackInInternalSlot(cslot)
-    if classifyBee(stack) then
-      agent().select(cslot)
-      local firstEmpty, done = nil, false
-      for s = 1, size do
-        local existing = invCtrl().getStackInSlot(down, s)
-        if existing == nil then
-          firstEmpty = firstEmpty or s
-        elseif existing.name == stack.name and (existing.size or 1) < (existing.maxSize or 64) then
-          if invCtrl().dropIntoSlot(down, s) then done = true; break end
-        end
-      end
-      if not done and firstEmpty then invCtrl().dropIntoSlot(down, firstEmpty) end
+    if classifyBee(invCtrl().getStackInInternalSlot(cslot)) then
+      entries[#entries + 1] = { _slot = cslot }
     end
   end
+  if #entries > 0 then
+    local _, pending = M.depositBeesAcrossStores(config, entries)
+    if #pending > 0 then M.onStorageFull(config, pending) end
+  end
 
-  -- 2. Scan storage.
+  -- 2. Scan the whole network for the census (slotsByKey carries {pos, slot} so a
+  -- later fetch knows WHICH store to fly to).
   local summary, convertible, slotsByKey = {}, {}, {}
   local function rec(sp)
     summary[sp] = summary[sp] or { purePrincesses = 0, pureDrones = 0 }
     return summary[sp]
   end
-  local function addSlot(key, slot)
+  local function addSlot(key, pos, slot)
     slotsByKey[key] = slotsByKey[key] or {}
-    table.insert(slotsByKey[key], slot)
+    table.insert(slotsByKey[key], { pos = pos, slot = slot })
   end
-  for s = 1, size do
-    local c = classifyBee(invCtrl().getStackInSlot(down, s))
+  M.forEachStorageStack(config, function(pos, slot, stack)
+    local c = classifyBee(stack)
     if c then
       if c.role == "princess" and c.pure then
         rec(c.species).purePrincesses = rec(c.species).purePrincesses + c.size
-        addSlot("P:" .. c.species, s)
+        addSlot("P:" .. c.species, pos, slot)
       elseif c.role == "princess" then -- hybrid: conversion fodder toward either allele
         for allele in pairs(c.alleles) do
           convertible[allele] = (convertible[allele] or 0) + c.size
-          addSlot("V:" .. allele, s)
+          addSlot("V:" .. allele, pos, slot)
         end
       elseif c.role == "drone" and c.pure then
         rec(c.species).pureDrones = rec(c.species).pureDrones + c.size
-        addSlot("D:" .. c.species, s)
+        addSlot("D:" .. c.species, pos, slot)
       end
     end
-  end
+  end)
   return summary, convertible, slotsByKey
 end
 
--- Pull one bee from storage slot `sslot` into a free cargo slot (already at
--- storage). Returns true on success.
-local function fetchOne(config, sslot)
+-- Pull one bee named by `entry` ({ pos = <storeIndex>, slot }) into a free cargo
+-- slot, flying to that store first (the census spans the whole network, so the
+-- bee may be in a different store than the robot currently sits at). Returns true
+-- on success.
+local function fetchOne(config, entry)
   local down = sides().down
   local free
   for _, cslot in ipairs(config.workingSlots) do
     if cslot ~= config.honeySlot and invCtrl().getStackInInternalSlot(cslot) == nil then free = cslot; break end
   end
   if not free then return false end
+  local pos = M.storagePositions(config)[entry.pos]
+  if not pos then return false end
+  if not Nav.gotoXZ(pos.x, pos.z) then return false end
   agent().select(free)
-  local moved = invCtrl().suckFromSlot(down, sslot, 1)
+  local moved = invCtrl().suckFromSlot(down, entry.slot, 1)
   return moved and moved > 0
 end
 
@@ -1435,6 +1430,61 @@ local function findStackingSlot(getStackFn, slots, incomingStack)
   return firstEmpty
 end
 
+-- ============================================================
+-- Multi-store helpers: the bee STORAGE network spans every config.storagePositions
+-- block (see M.storagePositions). These visit each store in turn so scans and
+-- deposits cover the whole network, not just one chest.
+-- ============================================================
+
+-- Visit every storage block and call fn(posIndex, slot, stack) for each non-empty
+-- slot. Leaves the robot at the LAST store visited.
+function M.forEachStorageStack(config, fn)
+  local positions = M.storagePositions(config)
+  local down = sides().down
+  for pi, pos in ipairs(positions) do
+    if Nav.gotoXZ(pos.x, pos.z) then
+      local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+      for s = 1, size do
+        local stack = invCtrl().getStackInSlot(down, s)
+        if stack then fn(pi, s, stack) end
+      end
+    end
+  end
+end
+
+-- Deposit the cargo bees named by `entries` ({ { _slot = cargoSlot }, ... }) into
+-- the storage network, filling one store before spilling into the next (genome-
+-- aware stacking, then first empty). Returns dropped, pending -- pending are the
+-- entries that had NOWHERE to go (every store full). Leaves the robot at the last
+-- store it needed.
+function M.depositBeesAcrossStores(config, entries)
+  local positions = M.storagePositions(config)
+  local down = sides().down
+  local dropped, pending = 0, entries
+  for _, pos in ipairs(positions) do
+    if #pending == 0 then break end
+    if Nav.gotoXZ(pos.x, pos.z) then
+      local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+      local candidateSlots = {}
+      for s = 1, size do candidateSlots[s] = s end
+      local rest = {}
+      for _, e in ipairs(pending) do
+        local incoming = invCtrl().getStackInInternalSlot(e._slot)
+        local slot = incoming and findStackingSlot(
+          function(s) return invCtrl().getStackInSlot(down, s) end, candidateSlots, incoming)
+        if slot then
+          agent().select(e._slot)
+          if invCtrl().dropIntoSlot(down, slot) then dropped = dropped + 1 else rest[#rest + 1] = e end
+        else
+          rest[#rest + 1] = e
+        end
+      end
+      pending = rest
+    end
+  end
+  return dropped, pending
+end
+
 -- Forestry apiaries expose product/offspring output (combs, drones, the
 -- replacement princess) in every slot beyond the queen(1)/drone(2) pair.
 -- Confirmed via probeInventoryBelow() against real hardware: the old
@@ -1606,43 +1656,17 @@ end
 -- remain after the LAST store, storage is genuinely full -> M.onStorageFull
 -- (stop + beep). Returns the number actually deposited.
 function M.dumpToStorage(config, discardEntries, keepId)
-  local positions = M.storagePositions(config)
-  if #positions == 0 then return 0 end
+  if #M.storagePositions(config) == 0 then return 0 end
   Status.setStep("Flying discards to storage")
 
-  -- The bees actually eligible to move (skip the keepId and slot-less entries).
-  local pending = {}
+  -- The bees actually eligible to move (skip the keepId and slot-less entries),
+  -- mapped to the { _slot } shape depositBeesAcrossStores wants.
+  local entries = {}
   for _, e in ipairs(discardEntries) do
-    if e.drone.id ~= keepId and e.drone._slot then pending[#pending + 1] = e end
+    if e.drone.id ~= keepId and e.drone._slot then entries[#entries + 1] = { _slot = e.drone._slot } end
   end
 
-  local down = sides().down
-  local dropped = 0
-  for _, pos in ipairs(positions) do
-    if #pending == 0 then break end
-    if Nav.gotoXZ(pos.x, pos.z) then
-      local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
-      local candidateSlots = {}
-      for s = 1, size do candidateSlots[s] = s end
-      local rest = {}
-      for _, entry in ipairs(pending) do
-        local incoming = invCtrl().getStackInInternalSlot(entry.drone._slot)
-        -- Merge into a matching not-full stack if one exists, else first empty.
-        -- getStackInSlot is re-queried live, so a slot just filled this pass
-        -- isn't handed out twice.
-        local slot = incoming and findStackingSlot(
-          function(s) return invCtrl().getStackInSlot(down, s) end, candidateSlots, incoming)
-        if slot then
-          agent().select(entry.drone._slot)
-          if invCtrl().dropIntoSlot(down, slot) then dropped = dropped + 1 else rest[#rest + 1] = entry end
-        else
-          rest[#rest + 1] = entry -- this chest is full for this bee; try the next
-        end
-      end
-      pending = rest
-    end
-  end
-
+  local dropped, pending = M.depositBeesAcrossStores(config, entries)
   if #pending > 0 then M.onStorageFull(config, pending) end
   return dropped
 end
@@ -2114,14 +2138,10 @@ end
 --   perfected     = { [species]=true } species with a stored bee that is BOTH
 --                   species-pure AND coverable-GG (the perfect phase's goal)
 function M.scanStorageForProgram(config)
-  local down = sides().down
   local out = { summary = {}, maxBeeReached = false, banked = {}, perfected = {}, coverable = {} }
-  if not config.storagePos or not config.mutationGraph then return out end
-  if not Nav.gotoXZ(config.storagePos.x, config.storagePos.z) then return out end
-  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+  if #M.storagePositions(config) == 0 or not config.mutationGraph then return out end
   local bees = {} -- { {species, pure, ind}, ... }
-  for s = 1, size do
-    local stack = invCtrl().getStackInSlot(down, s)
+  M.forEachStorageStack(config, function(_pos, _slot, stack)
     local c = classifyBee(stack)
     if c then
       local rec = out.summary[c.species] or { purePrincesses = 0, pureDrones = 0 }
@@ -2131,7 +2151,7 @@ function M.scanStorageForProgram(config)
       if c.pure then out.banked[c.species] = true end
       bees[#bees + 1] = { species = c.species, pure = c.pure, ind = readIndividual(stack) }
     end
-  end
+  end)
   local ownedLeaves = {}
   for sp in pairs(out.summary) do
     if (config.mutationGraph.leaves or {})[sp] then ownedLeaves[sp] = true end

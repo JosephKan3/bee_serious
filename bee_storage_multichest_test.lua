@@ -123,6 +123,30 @@ do
 end
 
 -- ============================================================
+-- Genebank census spans the WHOLE network: a purebred bee in EACH of two
+-- different stores is both counted, and its fetch index carries which store.
+-- ============================================================
+do
+  for i = 1, 3 do Sim.world.storages[i].slots = {} end
+  Sim.world.storage = Sim.world.storages[1].slots
+  for _, slot in ipairs(config.workingSlots) do Sim.world.drone.inventory[slot] = nil end
+  -- purebred (species-homozygous) drones, one per store.
+  Sim.world.storages[1].slots[1] = Sim.toStack(Sim.makeStartingRaw(traits, "Forest"), "drone", true)
+  Sim.world.storages[2].slots[1] = Sim.toStack(Sim.makeStartingRaw(traits, "Meadows"), "drone", true)
+  config.onStorageFull = function() end
+
+  local summary, _, slotsByKey = M.syncBanksToStorage(config)
+  check("census counts the Forest drone (store 1)", (summary.Forest and summary.Forest.pureDrones or 0) >= 1)
+  check("census counts the Meadows drone (store 2)", (summary.Meadows and summary.Meadows.pureDrones or 0) >= 1)
+  check("fetch index knows Forest is in store 1",
+    slotsByKey["D:Forest"] and slotsByKey["D:Forest"][1].pos == 1,
+    slotsByKey["D:Forest"] and tostring(slotsByKey["D:Forest"][1].pos) or "nil")
+  check("fetch index knows Meadows is in store 2",
+    slotsByKey["D:Meadows"] and slotsByKey["D:Meadows"][1].pos == 2,
+    slotsByKey["D:Meadows"] and tostring(slotsByKey["D:Meadows"][1].pos) or "nil")
+end
+
+-- ============================================================
 -- Fallback: no storagePositions -> single legacy storagePos still works.
 -- ============================================================
 do

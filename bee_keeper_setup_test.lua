@@ -8,14 +8,24 @@ package.loaded["sides"] = { down = 1 }
 
 local visitedCells = {}
 local blocksByCell = {}  -- ["x:z"] = blockName
+local invByCell = {}     -- ["x:z"] = { name = <invName>, size = <slotCount> }
+
+local function cellKey()
+  local pos = require("bee_keeper_nav").getPos()
+  return pos.x .. ":" .. pos.z
+end
 
 package.loaded["component"] = {
   geolyzer = {
     analyze = function(side)
-      local pos = require("bee_keeper_nav").getPos()
-      local key = pos.x .. ":" .. pos.z
-      return { name = blocksByCell[key] or "minecraft:air" }
+      return { name = blocksByCell[cellKey()] or "minecraft:air" }
     end,
+  },
+  -- Inventory the robot sees below at the current cell (nil for non-inventories),
+  -- so scanArea can autodetect storage vs the honey drawer/barrel by name/size.
+  inventory_controller = {
+    getInventoryName = function(side) local e = invByCell[cellKey()]; return e and e.name end,
+    getInventorySize = function(side) local e = invByCell[cellKey()]; return e and e.size end,
   },
   -- No robot/drone/computer registered -- isAvailable always false, so
   -- flyBorderPreview's light-flash/beep signaling never fires (both
@@ -86,6 +96,64 @@ do
     result.trashSites[1].x == 4 and result.trashSites[1].z == 0)
   check("trash and storage are classified separately, not lumped together",
     result.storageSites[1].x ~= result.trashSites[1].x or result.storageSites[1].z ~= result.trashSites[1].z)
+end
+
+-- ============================================================
+-- Test: classifyBlock (pure) -- barrel/drawer -> honey, others -> bee storage
+-- ============================================================
+
+do
+  local cfg = {
+    apiaryBlockNames = { "Forestry:apiculture" },
+    storageBlockNames = { "minecraft:chest" },
+    trashBlockNames = { "ExtraUtilities:trashcan" },
+    honeyStoreNames = { "barrel", "drawer" },
+  }
+  check("apiary by geolyzer name", Setup.classifyBlock(cfg, "Forestry:apiculture", nil, 12) == "apiary")
+  check("trash by geolyzer name", Setup.classifyBlock(cfg, "ExtraUtilities:trashcan", nil, 1) == "trash")
+  check("honey drawer by inventory name", Setup.classifyBlock(cfg, "somemod:block", "tile.fullDrawers1", 2) == "honey")
+  check("honey barrel by block name", Setup.classifyBlock(cfg, "etfuturum:barrel", nil, nil) == "honey")
+  check("apiarist chest -> bee storage (real inventory, not a barrel/drawer)",
+    Setup.classifyBlock(cfg, "unknown:apiaristchest", "tile.for.apicultureChest", 125) == "storage")
+  check("plain chest -> bee storage by block name", Setup.classifyBlock(cfg, "minecraft:chest", nil, 27) == "storage")
+  check("any real inventory -> bee storage even if block name unknown",
+    Setup.classifyBlock(cfg, "somemod:fancychest", "tile.fancyChest", 54) == "storage")
+  check("non-inventory -> nil", Setup.classifyBlock(cfg, "minecraft:dirt", nil, nil) == nil)
+  check("honey check beats generic storage (a barrel IS an inventory)",
+    Setup.classifyBlock(cfg, "etfuturum:barrel", "tile.barrel", 1) == "honey")
+end
+
+-- ============================================================
+-- Test: scanArea autoscans a mix -- 2 chests + apiarist chest -> bee storage,
+-- a drawer -> honey, all in one sweep.
+-- ============================================================
+
+do
+  visitedCells = {}
+  blocksByCell = {
+    ["1:1"] = "Forestry:apiculture",
+    ["0:2"] = "minecraft:chest",
+    ["2:0"] = "unknown:apiaristchest",
+    ["3:3"] = "unknown:drawerblock",
+  }
+  invByCell = {
+    ["0:2"] = { name = "tile.chest", size = 27 },
+    ["2:0"] = { name = "tile.for.apicultureChest", size = 125 },
+    ["3:3"] = { name = "tile.fullDrawers1", size = 2 },
+  }
+  local config = {
+    apiaryBlockNames = { "Forestry:apiculture" },
+    storageBlockNames = { "minecraft:chest" },
+    trashBlockNames = { "ExtraUtilities:trashcan" },
+    honeyStoreNames = { "barrel", "drawer" },
+  }
+  local result = Setup.scanArea(config, 4, 4)
+  check("autoscan: 1 apiary", #result.apiarySites == 1, "found=" .. #result.apiarySites)
+  check("autoscan: 2 bee-storage blocks (chest + apiarist chest)", #result.storageSites == 2,
+    "found=" .. #result.storageSites)
+  check("autoscan: 1 honey drawer", #result.honeySites == 1, "found=" .. #result.honeySites)
+  check("autoscan: the drawer is the honey site", result.honeySites[1].x == 3 and result.honeySites[1].z == 3)
+  invByCell = {} -- reset for later tests
 end
 
 -- ============================================================

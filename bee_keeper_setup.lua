@@ -65,6 +65,40 @@ local function matchesAny(blockName, names)
   return false
 end
 
+-- Case-insensitive SUBSTRING match of any of `patterns` against any of the given
+-- name strings. Used for honey drawers/barrels, whose block registry name varies
+-- by mod but whose inventory name reliably contains "drawer"/"barrel".
+local DEFAULT_HONEY_NAMES = { "barrel", "drawer" }
+local function nameLooksLike(patterns, ...)
+  patterns = patterns or DEFAULT_HONEY_NAMES
+  for _, s in ipairs({ ... }) do
+    if s then
+      local ls = tostring(s):lower()
+      for _, p in ipairs(patterns) do
+        if ls:find(tostring(p):lower(), 1, true) then return true end
+      end
+    end
+  end
+  return false
+end
+
+-- Pure block classifier (testable). Given the geolyzer block name plus the
+-- inventory_controller name/size seen at that cell, decide what the block is:
+--   "apiary" | "trash" | "honey" | "storage" | nil (uninteresting).
+-- Order matters: apiaries/trash are matched by their geolyzer block name FIRST
+-- (they're inventories too), THEN the honeydew drawer/barrel (kept separate --
+-- config.honeyStoreNames, default barrel/drawer), and everything else that is a
+-- real inventory (or a configured storage block name) is BEE storage. This is
+-- why the barrel is "always honey": it matches the honey rule before the generic
+-- storage rule.
+function M.classifyBlock(config, blockName, invName, invSize)
+  if matchesAny(blockName, config.apiaryBlockNames) then return "apiary" end
+  if matchesAny(blockName, config.trashBlockNames) then return "trash" end
+  if nameLooksLike(config.honeyStoreNames, blockName, invName) then return "honey" end
+  if (invSize and invSize > 0) or matchesAny(blockName, config.storageBlockNames) then return "storage" end
+  return nil
+end
+
 -- Prints the raw geolyzer.analyze() result for the block directly below
 -- the drone's CURRENT position -- call this manually while hovering over
 -- a known apiary or storage block to get the real name string for your
@@ -263,13 +297,15 @@ local function sweepCells(width, depth)
 end
 
 -- Sweeps the whole area, classifying the block below at each cell.
--- Returns { apiarySites = {{x,z},...}, storageSites = {{x,z},...},
--- trashSites = {{x,z},...} }.
+-- Returns { apiarySites = {...}, storageSites = {...}, honeySites = {...},
+-- trashSites = {...} } (each a list of {x,z}). Storage is autoscanned: a barrel/
+-- drawer becomes HONEY storage, every other inventory becomes BEE storage.
 function M.scanArea(config, width, depth)
   local geolyzer = component().geolyzer
+  local ic = component().inventory_controller
   local downSide = sides().down
 
-  local apiarySites, storageSites, trashSites = {}, {}, {}
+  local apiarySites, storageSites, honeySites, trashSites = {}, {}, {}, {}
   local cells = sweepCells(width, depth)
 
   for i, cell in ipairs(cells) do
@@ -277,39 +313,47 @@ function M.scanArea(config, width, depth)
     if ok then
       local result = geolyzer.analyze(downSide)
       local blockName = result and result.name
-      if matchesAny(blockName, config.apiaryBlockNames) then
-        table.insert(apiarySites, { x = cell[1], z = cell[2] })
-      elseif matchesAny(blockName, config.trashBlockNames) then
-        table.insert(trashSites, { x = cell[1], z = cell[2] })
-      elseif matchesAny(blockName, config.storageBlockNames) then
-        table.insert(storageSites, { x = cell[1], z = cell[2] })
-      end
+      -- The inventory name/size are the reliable signal for storage vs honey
+      -- (the drawer reports "tile.fullDrawers1", the apiarist chest
+      -- "tile.for.apicultureChest") -- geolyzer block names vary by mod and
+      -- aren't all confirmed. Guarded: a non-inventory block just yields nil.
+      local okN, invName = pcall(function() return ic.getInventoryName(downSide) end)
+      local okS, invSize = pcall(function() return ic.getInventorySize(downSide) end)
+      local cat = M.classifyBlock(config, blockName, okN and invName or nil, okS and invSize or nil)
+      if cat == "apiary" then table.insert(apiarySites, { x = cell[1], z = cell[2] })
+      elseif cat == "trash" then table.insert(trashSites, { x = cell[1], z = cell[2] })
+      elseif cat == "honey" then table.insert(honeySites, { x = cell[1], z = cell[2] })
+      elseif cat == "storage" then table.insert(storageSites, { x = cell[1], z = cell[2] }) end
     else
       print(string.format("Skipped cell (%d,%d): could not reach it", cell[1], cell[2]))
     end
 
     if i % 10 == 0 then
-      print(string.format("Scanned %d/%d cells -- %d apiaries, %d storage candidates, %d trash candidates so far",
-        i, #cells, #apiarySites, #storageSites, #trashSites))
+      print(string.format("Scanned %d/%d cells -- %d apiaries, %d bee storage, %d honey, %d trash so far",
+        i, #cells, #apiarySites, #storageSites, #honeySites, #trashSites))
     end
   end
 
-  return { apiarySites = apiarySites, storageSites = storageSites, trashSites = trashSites }
+  return { apiarySites = apiarySites, storageSites = storageSites,
+    honeySites = honeySites, trashSites = trashSites }
 end
 
 -- ============================================================
 -- Main entry point
 -- ============================================================
 
--- config: needs apiaryBlockNames, storageBlockNames, trashBlockNames (see
--- header notes). Returns the saved-sites table ({ sites = {...},
--- storagePos = {...} or nil, trashPos = {...} or nil, width=.., depth=.. }),
+-- config: needs apiaryBlockNames, storageBlockNames, honeyStoreNames,
+-- trashBlockNames (see header notes). Returns the saved-sites table ({ sites,
+-- storagePositions = {...}, storagePos, honeyStoragePos, trashPos, width, depth }),
 -- or nil if the user skipped setup with no existing file to fall back on.
 function M.run(config)
   local existing = loadFile(M.SITES_FILE)
   if existing then
-    print(string.format("Found existing site config (%d apiaries, storage %s, trash %s). Press Enter to keep it, or type 'rescan' to redo:",
-      #existing.sites, existing.storagePos and "found" or "not found", existing.trashPos and "found" or "not found"))
+    local nStore = existing.storagePositions and #existing.storagePositions
+      or (existing.storagePos and 1) or 0
+    print(string.format("Found existing site config (%d apiaries, %d bee-storage, honey %s, trash %s). Press Enter to keep it, or type 'rescan' to redo:",
+      #existing.sites, nStore, existing.honeyStoragePos and "found" or "not found",
+      existing.trashPos and "found" or "not found"))
     local line = io.read()
     if line ~= "rescan" then
       return existing
@@ -347,10 +391,17 @@ function M.run(config)
     table.insert(sites, { name = "site" .. i, x = s.x, z = s.z, mode = "traitmax" })
   end
 
-  local storagePos = result.storageSites[1]
-  if #result.storageSites > 1 then
-    print(string.format("Found %d storage candidates, using the first at (%d,%d). Edit %s to change.",
-      #result.storageSites, storagePos.x, storagePos.z, M.SITES_FILE))
+  -- ALL bee-storage blocks make up the storage network (the robot fills one and
+  -- spills into the next); storagePos stays set to the first for backward compat.
+  local storagePositions = result.storageSites
+  local storagePos = storagePositions[1]
+  print(string.format("Found %d bee-storage block(s).", #storagePositions))
+
+  -- The honeydew barrel/drawer is separate storage. First one found wins.
+  local honeyStoragePos = result.honeySites[1]
+  if #result.honeySites > 1 then
+    print(string.format("Found %d honey barrels/drawers, using the first at (%d,%d). Edit %s to change.",
+      #result.honeySites, honeyStoragePos.x, honeyStoragePos.z, M.SITES_FILE))
   end
 
   local trashPos = result.trashSites[1]
@@ -359,10 +410,12 @@ function M.run(config)
       #result.trashSites, trashPos.x, trashPos.z, M.SITES_FILE))
   end
 
-  local saved = { sites = sites, storagePos = storagePos, trashPos = trashPos, width = width, depth = depth }
+  local saved = { sites = sites, storagePositions = storagePositions, storagePos = storagePos,
+    honeyStoragePos = honeyStoragePos, trashPos = trashPos, width = width, depth = depth }
   saveFile(M.SITES_FILE, saved)
-  print(string.format("Saved %d apiary sites%s%s to %s.", #sites,
-    storagePos and " and 1 storage location" or " (no storage container found)",
+  print(string.format("Saved %d apiary site(s), %d bee-storage block(s)%s%s to %s.",
+    #sites, #storagePositions,
+    honeyStoragePos and " and a honey drawer" or " (no honey drawer found)",
     trashPos and " and 1 trash can" or " (no trash can found)", M.SITES_FILE))
   print("Every discovered site defaults to traitmax mode -- edit " .. M.SITES_FILE ..
     " (or bee_keeper_manager_config.lua's siteOverrides) to assign species/mutation targets.")

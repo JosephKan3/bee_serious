@@ -71,26 +71,27 @@ return {
   -- immediately.
   trashSlotCount = 1,
 
-  -- Block names the area scan (bee_keeper_setup.lua) treats as "this is an
-  -- apiary" / "this is the storage container" / "this is the trash can",
-  -- matched against geolyzer.analyze(sides.down).name. "Forestry:apiculture"
-  -- confirmed via probeBlockBelow() against a real apiary -- note the
-  -- capital F, and "apiculture" not "apiary" (both wrong in the earlier
-  -- guess). If you also use an Alveary or Industrial Apiary, probe one of
-  -- those too -- no reason to assume they report the same name. Add any
-  -- storage container's real block name here the same way --
-  -- "etfuturum:barrel" was added after the scan failed to recognize a
-  -- barrel as storage. "ExtraUtilities:trashcan" is an UNCONFIRMED GUESS
-  -- for Extra Utilities' Trash Can -- verify with probeBlockBelow() the
-  -- same way before relying on it.
+  -- Autoscan block classification (bee_keeper_setup.lua). Apiaries and trash are
+  -- matched by geolyzer.analyze(sides.down).name; storage is autodetected as ANY
+  -- inventory the robot can address (getInventorySize > 0), so you don't have to
+  -- enumerate every chest/barrel type. "Forestry:apiculture" confirmed via
+  -- probeBlockBelow() -- note the capital F and "apiculture" not "apiary". If you
+  -- also use an Alveary/Industrial Apiary, probe one and add its name too.
   apiaryBlockNames = {
     "Forestry:apiculture",
   },
+  -- Optional extra geolyzer names to FORCE-classify as bee storage even if the
+  -- inventory check misses them. Not usually needed (autodetect handles chests,
+  -- barrels-used-as-chests, apiarist chests, etc.).
   storageBlockNames = {
     "minecraft:chest",
     "minecraft:trapped_chest",
-    "etfuturum:barrel",
   },
+  -- HONEY storage is kept separate: any block whose registry OR inventory name
+  -- contains one of these substrings becomes the honeydew drawer (honeyStoragePos)
+  -- instead of bee storage -- so "the barrel is always honey". Matched
+  -- case-insensitively against both names (drawer reports "tile.fullDrawers1").
+  honeyStoreNames = { "barrel", "drawer" },
   trashBlockNames = {
     "ExtraUtilities:trashcan",
   },

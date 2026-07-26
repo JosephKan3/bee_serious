@@ -106,7 +106,11 @@ local function main(args)
   end
 
   config.sites = M.loadSites(saved.sites, config.siteOverrides)
+  -- Bee-storage network (autoscanned): the whole list of stores, falling back to
+  -- the single legacy storagePos. Honey drawer/barrel is a SEPARATE scanned block.
+  config.storagePositions = config.storagePositions or saved.storagePositions
   config.storagePos = config.storagePos or saved.storagePos
+  config.honeyStoragePos = config.honeyStoragePos or saved.honeyStoragePos
   config.trashPos = config.trashPos or saved.trashPos
   config.workingSlots = M.resolveWorkingSlots(config)
 
