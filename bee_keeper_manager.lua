@@ -1566,9 +1566,84 @@ local function dumpEntriesAt(pos, slotCount, discardEntries, keepId)
   return dropped
 end
 
+-- The list of apiarist-chest storage positions, in fill order. Prefers the
+-- multi-chest config.storagePositions (the robot flies between several apiarist
+-- chests); falls back to the single legacy config.storagePos so nothing that
+-- only set the old field breaks.
+function M.storagePositions(config)
+  if config.storagePositions and #config.storagePositions > 0 then
+    return config.storagePositions
+  end
+  if config.storagePos then return { config.storagePos } end
+  return {}
+end
+
+-- STORAGE FULL handler: every apiarist chest is full and `pending` bees have
+-- nowhere to go. Per the user's design the robot STOPS and BEEPS rather than
+-- silently dropping bees on the floor. config.onStorageFull(config, pending)
+-- overrides (tests inject one that records the event instead of blocking). The
+-- real-hardware default beeps and blocks until the user frees a chest and pokes
+-- the robot (any signal) -- same beep+pullSignal pattern as the special-condition
+-- gate. Returns nothing; the caller has already placed everything it could.
+function M.onStorageFull(config, pending)
+  if config.onStorageFull then return config.onStorageFull(config, pending) end
+  Status.setStep("STORAGE FULL -- halted (free a chest, then poke the robot)")
+  print(string.format("[storage full] All %d apiarist chest(s) are full; %d bee(s) have nowhere to go.",
+    #M.storagePositions(config), pending and #pending or 0))
+  print("   Empty or add a chest, then press any key / poke the robot to continue...")
+  local computer = require("computer")
+  while true do
+    M.beepAlert()
+    local ok, ev = pcall(function() return computer.pullSignal(5) end)
+    if not ok then break end        -- host without pullSignal: don't spin forever
+    if ev ~= nil then break end      -- a real signal arrived -> user intervened
+  end
+end
+
+-- Fly discarded bees to storage, spreading across every apiarist chest in fill
+-- order: fill chest 1, spill the rest into chest 2, and so on. If bees still
+-- remain after the LAST chest, storage is genuinely full -> M.onStorageFull
+-- (stop + beep). Returns the number actually deposited.
 function M.dumpToStorage(config, discardEntries, keepId)
+  local positions = M.storagePositions(config)
+  if #positions == 0 then return 0 end
   Status.setStep("Flying discards to storage")
-  return dumpEntriesAt(config.storagePos, config.storageSlotCount, discardEntries, keepId)
+
+  -- The bees actually eligible to move (skip the keepId and slot-less entries).
+  local pending = {}
+  for _, e in ipairs(discardEntries) do
+    if e.drone.id ~= keepId and e.drone._slot then pending[#pending + 1] = e end
+  end
+
+  local down = sides().down
+  local dropped = 0
+  for _, pos in ipairs(positions) do
+    if #pending == 0 then break end
+    if Nav.gotoXZ(pos.x, pos.z) then
+      local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+      local candidateSlots = {}
+      for s = 1, size do candidateSlots[s] = s end
+      local rest = {}
+      for _, entry in ipairs(pending) do
+        local incoming = invCtrl().getStackInInternalSlot(entry.drone._slot)
+        -- Merge into a matching not-full stack if one exists, else first empty.
+        -- getStackInSlot is re-queried live, so a slot just filled this pass
+        -- isn't handed out twice.
+        local slot = incoming and findStackingSlot(
+          function(s) return invCtrl().getStackInSlot(down, s) end, candidateSlots, incoming)
+        if slot then
+          agent().select(entry.drone._slot)
+          if invCtrl().dropIntoSlot(down, slot) then dropped = dropped + 1 else rest[#rest + 1] = entry end
+        else
+          rest[#rest + 1] = entry -- this chest is full for this bee; try the next
+        end
+      end
+      pending = rest
+    end
+  end
+
+  if #pending > 0 then M.onStorageFull(config, pending) end
+  return dropped
 end
 
 function M.dumpToTrash(config, discardEntries, keepId)
@@ -1587,7 +1662,8 @@ end
 -- ============================================================
 
 function M.restockFromStorage(config)
-  if not config.storagePos then return 0 end
+  local positions = M.storagePositions(config)
+  if #positions == 0 then return 0 end
 
   -- Cheap upfront check -- not worth a whole trip if cargo has zero
   -- room to receive anything at all. (Once there, actual destination
@@ -1603,27 +1679,31 @@ function M.restockFromStorage(config)
   if not hasFreeSlot then return 0 end
 
   Status.setStep("Restocking from storage")
-  local ok = Nav.gotoXZ(config.storagePos.x, config.storagePos.z)
-  if not ok then return 0 end
-
   local down = sides().down
-  local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
   local restocked = 0
-  for slot = 1, size do
-    local stack = invCtrl().getStackInSlot(down, slot)
-    if stack and readIndividual(stack) then
-      -- Prefers merging into an existing matching, not-yet-full cargo
-      -- stack over always claiming a fresh empty slot -- without this,
-      -- a restocked bee never stacked together with an identical one
-      -- already sitting in cargo, one at a time forever.
-      local destSlot = findStackingSlot(invCtrl().getStackInInternalSlot, config.workingSlots, stack)
-      if destSlot then
-        agent().select(destSlot)
-        -- Pulls the WHOLE matching stack in one go, not a hardcoded 1
-        -- -- otherwise several identical bees stacked in one storage
-        -- slot only ever gave up one unit per visit.
-        local moved = invCtrl().suckFromSlot(down, slot, stack.size or 1)
-        if moved and moved > 0 then restocked = restocked + 1 end
+  -- Visit each apiarist chest until cargo has no more room to receive.
+  for _, pos in ipairs(positions) do
+    if not Nav.gotoXZ(pos.x, pos.z) then
+      -- skip an unreachable chest, try the next
+    else
+      local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+      for slot = 1, size do
+        local stack = invCtrl().getStackInSlot(down, slot)
+        if stack and readIndividual(stack) then
+          -- Prefers merging into an existing matching, not-yet-full cargo
+          -- stack over always claiming a fresh empty slot -- without this,
+          -- a restocked bee never stacked together with an identical one
+          -- already sitting in cargo, one at a time forever.
+          local destSlot = findStackingSlot(invCtrl().getStackInInternalSlot, config.workingSlots, stack)
+          if destSlot then
+            agent().select(destSlot)
+            -- Pulls the WHOLE matching stack in one go, not a hardcoded 1
+            -- -- otherwise several identical bees stacked in one storage
+            -- slot only ever gave up one unit per visit.
+            local moved = invCtrl().suckFromSlot(down, slot, stack.size or 1)
+            if moved and moved > 0 then restocked = restocked + 1 end
+          end
+        end
       end
     end
   end

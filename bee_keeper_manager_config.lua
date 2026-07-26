@@ -147,6 +147,16 @@ return {
   storagePos = nil,
   trashPos = nil,
 
+  -- MULTIPLE apiarist chests (the storage backend). The robot flies between
+  -- these in order, filling one chest before spilling into the next. Each is an
+  -- {x,z} above a Forestry Apiarist's Chest (125 slots; drones stack to 64),
+  -- accessed on side=down like storagePos. When EVERY chest is full and a bee
+  -- still has nowhere to go, the robot STOPS and BEEPS (M.onStorageFull) instead
+  -- of dropping bees -- add/empty a chest and poke it to resume. Leave nil to
+  -- fall back to the single storagePos above.
+  --   storagePositions = { { x = -6, z = -6 }, { x = -6, z = -8 }, { x = -6, z = -10 } },
+  storagePositions = nil,
+
   -- sites gets filled in by bee_keeper_manager_run.lua from the persisted
   -- scan + siteOverrides above (see M.loadSites) -- leave nil here.
   sites = nil,

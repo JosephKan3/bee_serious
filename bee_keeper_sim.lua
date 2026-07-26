@@ -828,11 +828,45 @@ function M.install(config, sites, opts)
   opts = opts or {}
   local world = M.newWorld(config, sites, opts)
   world.cargoSize = opts.cargoSize or 16
-  world.storageSize = opts.storageSize or 27
+  -- Primary-chest size: opts.storageSize, or the first entry of opts.storageSizes
+  -- when a multi-chest test wants per-chest sizes (chest #1 aliases world.storage,
+  -- so its cap lives in world.storageSize).
+  world.storageSize = opts.storageSize or (opts.storageSizes and opts.storageSizes[1]) or 27
 
   local function apiaryAt(x, z) return world.apiaries[x .. ":" .. z] end
   local function atPos(px, pz) return px ~= nil and world.drone.x == px and world.drone.z == pz end
-  local function atStorage() return config.storagePos and atPos(config.storagePos.x, config.storagePos.z) end
+
+  -- MULTI-CHEST storage: the robot flies between several apiarist chests (per the
+  -- user's design -- one bounded chest per position). config.storagePositions is
+  -- the authoritative list; the legacy single config.storagePos is chest #1.
+  -- Chest #1 aliases world.storage so all the existing seeding (putStorage, honey
+  -- backup) still lands somewhere real; extra chests get fresh bounded tables.
+  world.storages = {}
+  do
+    local positions = config.storagePositions
+    if positions and #positions > 0 then
+      for i, p in ipairs(positions) do
+        world.storages[i] = {
+          x = p.x, z = p.z, primary = (i == 1), slots = {},
+          size = (opts.storageSizes and opts.storageSizes[i]) or world.storageSize,
+        }
+      end
+    elseif config.storagePos then
+      world.storages[1] = { x = config.storagePos.x, z = config.storagePos.z, primary = true, slots = {} }
+    end
+  end
+  -- Resolve a chest's live view. Chest #1 (primary) aliases world.storage /
+  -- world.storageSize live -- tests reassign world.storage = {} after install, so
+  -- a captured reference would go stale; resolving live keeps the alias honest.
+  local function currentStorage()
+    for _, s in ipairs(world.storages) do
+      if atPos(s.x, s.z) then
+        if s.primary then return { slots = world.storage, size = world.storageSize } end
+        return s
+      end
+    end
+    return nil
+  end
   local function atTrash() return config.trashPos and atPos(config.trashPos.x, config.trashPos.z) end
   local function atCharger() return config.chargerPos and atPos(config.chargerPos.x, config.chargerPos.z) end
 
@@ -969,7 +1003,8 @@ function M.install(config, sites, opts)
     getInventorySize = function(side)
       if side ~= DOWN then return nil end
       if atTrash() then return 1 end
-      if atStorage() then return world.storageSize end
+      local cs = currentStorage()
+      if cs then return cs.size end
       if apiaryAt(world.drone.x, world.drone.z) then return APIARY_SIZE end
       return nil
     end,
@@ -980,9 +1015,10 @@ function M.install(config, sites, opts)
     getStackInSlot = function(side, slot)
       if side ~= DOWN then return nil end
       if atTrash() then return nil end -- auto-deleted, nothing to see from outside
-      if atStorage() then
-        if slot < 1 or slot > world.storageSize then return nil end
-        return world.storage[slot]
+      local cs = currentStorage()
+      if cs then
+        if slot < 1 or slot > cs.size then return nil end
+        return cs.slots[slot]
       end
       local a = apiaryAt(world.drone.x, world.drone.z)
       if not a then return nil end
@@ -1009,9 +1045,10 @@ function M.install(config, sites, opts)
       if atTrash() then return 0 end
 
       local sourceContainer, sourceSlot
-      if atStorage() then
-        if slot < 1 or slot > world.storageSize then return 0 end
-        sourceContainer, sourceSlot = world.storage, slot
+      local cs = currentStorage()
+      if cs then
+        if slot < 1 or slot > cs.size then return 0 end
+        sourceContainer, sourceSlot = cs.slots, slot
       else
         local a = apiaryAt(world.drone.x, world.drone.z)
         if not a or slot < 1 or slot > APIARY_SIZE or isFrameSlot(slot) or slot == 1 or slot == 2 then
@@ -1050,9 +1087,10 @@ function M.install(config, sites, opts)
         return true
       end
 
-      if atStorage() then
-        if slot < 1 or slot > world.storageSize then return false end
-        local moved = depositInto(world.storage, slot, stack, stack.size or 1)
+      local cs = currentStorage()
+      if cs then
+        if slot < 1 or slot > cs.size then return false end
+        local moved = depositInto(cs.slots, slot, stack, stack.size or 1)
         if moved <= 0 then return false end
         stack.size = (stack.size or 1) - moved
         if stack.size <= 0 then world.drone.inventory[selected] = nil end
