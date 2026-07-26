@@ -86,9 +86,15 @@ local function main(args)
 
   local uiEnabled = false
   local stepEnabled = false
-  for _, a in ipairs(args) do
+  local traceDir = nil
+  for i, a in ipairs(args) do
     if a == "ui" then uiEnabled = true end
     if a == "step" then stepEnabled = true end
+    -- `trace <dir>`: export a per-step state trace the local simulator can
+    -- replay to import inheritance + validate every other action. Takes the
+    -- PARENT DIRECTORY (e.g. the robot's home dir), not a full file path --
+    -- bee_trace drops bee_trace.dat inside it.
+    if a == "trace" then traceDir = args[i + 1] or "." end
   end
 
   -- STEP MODE (bee_keeper_manager_run step): pause before every TASK so real
@@ -176,6 +182,76 @@ local function main(args)
     end
   end
 
+  -- TRACE EXPORT: write one bee_trace snapshot per task boundary so a live
+  -- Minecraft run produces exactly the file bee_keeper_scenario_sim consumes
+  -- (`replay <dir>`) to import inheritance RNG and validate every other action.
+  local curCycle = 0
+  local traceWriter, captureAndWrite = nil, function() end
+  if traceDir then
+    local T = require("bee_trace")
+    local component = require("component")
+    local sides = require("sides")
+    local invCtrl = component.inventory_controller
+    local tracePath = T.pathInDir(traceDir)
+    traceWriter = T.writer(io.open, tracePath)
+    print("Trace export -> " .. tracePath)
+
+    -- Sites keyed by "x:z" so a snapshot can tell when the robot is ABOVE an
+    -- apiary (the only time it can observe that apiary's queen/drone/output),
+    -- matching the sim's apiaryKeyOver().
+    local siteByPos = {}
+    for _, s in ipairs(config.sites) do siteByPos[s.x .. ":" .. s.z] = s end
+
+    -- BIRTH DETECTION: Minecraft does the mating, so offspring genomes are only
+    -- observable as the bees harvested out of an apiary. harvestSite hands us
+    -- the raw stacks; expand each by stack size into individual offspring recs
+    -- (a stacked drone slot = N identical offspring), princess first to match
+    -- the sim's offspring[1]=new-princess convention.
+    local pendingBirths = {}
+    M.traceOnHarvest = function(key, stacks)
+      local recs = {}
+      for _, st in ipairs(stacks) do
+        local one = {}
+        for k, v in pairs(st) do one[k] = v end
+        one.size = 1
+        local rec = T.beeRecord(one)
+        for _ = 1, (st.size or 1) do recs[#recs + 1] = rec end
+      end
+      table.sort(recs, function(a, b)
+        local ra = (a.kind == "princess") and 0 or 1
+        local rb = (b.kind == "princess") and 0 or 1
+        return ra < rb
+      end)
+      pendingBirths[#pendingBirths + 1] = { key = key, recs = recs }
+    end
+
+    captureAndWrite = function()
+      local pos = Nav.getPos()
+      local snap = { cycle = curCycle, step = Status.get().step,
+        pos = { x = pos.x, z = pos.z }, sel = false, cargo = {} }
+      for _, entry in ipairs(M.listCargo(config)) do
+        local rec = T.beeRecord(entry.stack)
+        if rec then snap.cargo[entry.slot] = rec end
+      end
+      local key = pos.x .. ":" .. pos.z
+      if siteByPos[key] then
+        local down = sides.down
+        local ap = { key = key, out = {} }
+        local q = invCtrl.getStackInSlot(down, 1); if q then ap.queen = T.beeRecord(q) end
+        local d = invCtrl.getStackInSlot(down, 2); if d then ap.drone = T.beeRecord(d) end
+        local size = invCtrl.getInventorySize(down) or 15
+        for slot = 3, size do
+          local s = invCtrl.getStackInSlot(down, slot)
+          local rec = s and T.beeRecord(s)
+          if rec then ap.out[slot] = rec end
+        end
+        snap.apiary = ap
+      end
+      if #pendingBirths > 0 then snap.births = pendingBirths; pendingBirths = {} end
+      traceWriter.step(snap)
+    end
+  end
+
   if uiEnabled then
     local UI = require("bee_keeper_ui")
     local computer = require("computer")
@@ -195,22 +271,26 @@ local function main(args)
     Status.onChange = function()
       local ok, chargePercent = pcall(function() return computer.energy() / computer.maxEnergy() end)
       UI.draw(config.sites, Nav.getPos(), extras, Status.get(), ok and chargePercent or nil, M.listCargo(config), nil)
+      captureAndWrite() -- record this task's state to the trace (no-op unless tracing)
       checkStep() -- pause after drawing this task's frame (no-op unless step mode)
     end
     Status.setStep("Starting up")
   else
     print(string.format("Managing %d apiary site(s)%s.", #config.sites,
       config.storagePos and (string.format(", storage at (%d,%d)", config.storagePos.x, config.storagePos.z)) or " (no storage location known)"))
-    if stepEnabled then
-      -- No dashboard: print each task then prompt to single-step it.
+    if stepEnabled or traceDir then
+      -- No dashboard: print each task, record it to the trace, then (in step
+      -- mode) prompt to single-step it.
       Status.onChange = function()
         print("  [" .. Status.get().step .. "]")
+        captureAndWrite()
         checkStep()
       end
     end
   end
 
   while true do
+    curCycle = curCycle + 1
     local log = M.runCycle(config)
     -- Always record each cycle's status lines to the log. In UI mode we don't
     -- want them scribbling over the dashboard, but they still MUST reach

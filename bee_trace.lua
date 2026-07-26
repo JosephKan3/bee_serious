@@ -36,6 +36,22 @@
 
 local M = {}
 
+-- Canonical trace filename. Both sides take a PARENT DIRECTORY (not a full file
+-- path) and drop this file inside it, so the same command works regardless of
+-- which run wrote it -- pass the folder, not the exact file.
+M.DEFAULT_NAME = "bee_trace.dat"
+
+-- Join a parent-directory path with DEFAULT_NAME. Tolerates a trailing slash
+-- (either separator) and picks the separator already used by the path (so it
+-- stays Windows- or POSIX-shaped as given); empty/nil -> just the filename in cwd.
+function M.pathInDir(dir)
+  if not dir or dir == "" then return M.DEFAULT_NAME end
+  local last = dir:sub(-1)
+  if last == "/" or last == "\\" then return dir .. M.DEFAULT_NAME end
+  local sep = dir:find("\\", 1, true) and "\\" or "/"
+  return dir .. sep .. M.DEFAULT_NAME
+end
+
 -- ---- pure serializer (tables of number|string|boolean|table) --------------
 local function serialize(v, out)
   local t = type(v)

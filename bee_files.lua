@@ -29,6 +29,7 @@ return {
     "bee_keeper_setup.lua",
     "bee_keeper_status.lua",
     "bee_keeper_ui.lua",
+    "bee_trace.lua",
     -- mutation / genebank / program subsystems
     "bee_mutation_graph.lua",
     "bee_genebank.lua",

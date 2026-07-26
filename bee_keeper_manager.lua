@@ -1813,6 +1813,12 @@ function M.harvestSite(config, site, productSlots)
   end
 
   local harvested = 0
+  -- Trace birth-detection: Minecraft (not our sim) does the actual mating, so
+  -- the offspring genomes -- the inheritance RNG the sim needs to import -- can
+  -- only be observed as the bees that come OUT of the apiary. Collect the raw
+  -- bee stacks harvested this call and hand them to M.traceOnHarvest (set only
+  -- by the trace runner); it's a no-op on a normal run.
+  local birthStacks = M.traceOnHarvest and {} or nil
   for _, productSlot in ipairs(productSlots) do
     if not size or productSlot <= size then
       -- Peeking first isn't just diagnostic -- it avoids burning a
@@ -1820,6 +1826,7 @@ function M.harvestSite(config, site, productSlots)
       -- already see is empty.
       local peek = invCtrl().getStackInSlot(down, productSlot)
       if peek then
+        if birthStacks and peek.individual then birthStacks[#birthStacks + 1] = peek end
         -- Prefers merging into an existing matching, not-yet-full cargo
         -- stack over always taking a fresh empty slot -- without this,
         -- identical harvested drones/combs spread across separate slots
@@ -1863,6 +1870,9 @@ function M.harvestSite(config, site, productSlots)
     end
     if #dump == 1 then table.insert(dump, "  (every slot reported empty)") end
     print(table.concat(dump, "\n"))
+  end
+  if birthStacks and #birthStacks > 0 then
+    M.traceOnHarvest((site.x or 0) .. ":" .. (site.z or 0), birthStacks)
   end
   return harvested
 end

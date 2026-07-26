@@ -43,8 +43,10 @@ do
   while i <= #args do
     local a = args[i]
     if a == "run" then autoRun = true
-    elseif a == "trace" then i = i + 1; tracePath = args[i]        -- EXPORT a trace
-    elseif a == "replay" then i = i + 1; replayPath = args[i]; autoRun = true -- IMPORT+VALIDATE
+    -- trace/replay take a PARENT DIRECTORY, not a full file path -- bee_trace
+    -- resolves bee_trace.dat inside it (same folder the real runner writes to).
+    elseif a == "trace" then i = i + 1; tracePath = require("bee_trace").pathInDir(args[i])       -- EXPORT a trace
+    elseif a == "replay" then i = i + 1; replayPath = require("bee_trace").pathInDir(args[i]); autoRun = true -- IMPORT+VALIDATE
     elseif tonumber(a) then cycles = tonumber(a) end
     i = i + 1
   end
