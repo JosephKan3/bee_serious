@@ -275,6 +275,73 @@ local function makeTemplateRaw(traitList, speciesName, templates)
 end
 M.makeTemplateRaw = makeTemplateRaw
 
+-- Attempt a mutation on the ORDERED species pair (first, second). Tries every
+-- recipe registered for that pair, in order, rolling each one's (boosted)
+-- chance; a conditioned recipe only fires when its special conditions are met.
+-- Returns the result species name on the first success, else nil. The pairIndex
+-- is SYMMETRIC (both orders inserted), so callers don't pre-sort the pair.
+local function attemptMutation(pairIndex, first, second, boost, conditionsMet)
+  local recipes = pairIndex[first .. "|" .. second]
+  if not recipes then return nil end
+  for _, r in ipairs(recipes) do
+    local chance = math.min(100, (r.chance or 0) * (boost or 1))
+    if conditionsMet(r.conditions) and math.random(100) <= chance then
+      return r.result
+    end
+  end
+  return nil
+end
+
+-- Produce ONE offspring genome from a princess x drone mating, faithfully to
+-- Forestry's real mechanic (see memory: gtnh-breeding-mechanics):
+--   Let A=princess.active, B=princess.inactive, C=drone.active, D=drone.inactive
+--   (species names). There are TWO parent slots resolved for the offspring; each
+--   INDEPENDENTLY rolls a mutation: 50% it attempts the cross (A,D), 50% (C,B).
+--   On success that whole parent slot becomes the PURE TEMPLATE bee of the result
+--   species; otherwise it stays the original princess/drone genome. Then every
+--   trait (incl. species) inherits one random allele from each resolved parent,
+--   written to the child's active/inactive in random order. Species active is
+--   then set to the dominant of the two (what the robot reads as the expressed
+--   species) -- a modelling simplification: real Forestry keeps the stored
+--   primary/secondary order (which fine-tunes future mutation chance), but that
+--   nuance doesn't affect whether Mendelian CONSOLIDATION converges, which is
+--   what these sims exercise.
+function M.mate(traitList, princessRaw, droneRaw, pairIndex, templates, boost, conditionsMet)
+  conditionsMet = conditionsMet or function() return true end
+  boost = boost or 1
+  local A = princessRaw.species.active.name
+  local B = princessRaw.species.inactive.name
+  local C = droneRaw.species.active.name
+  local D = droneRaw.species.inactive.name
+
+  -- Resolve one parent slot: possibly replaced by a pure mutation template.
+  local function resolveSlot(defaultRaw)
+    local first, second
+    if math.random() < 0.5 then first, second = A, D else first, second = C, B end
+    local result = attemptMutation(pairIndex, first, second, boost, conditionsMet)
+    if result and templates then return makeTemplateRaw(traitList, result, templates) end
+    if result then return makeTemplateRaw(traitList, result, nil) end
+    return defaultRaw
+  end
+
+  local P1 = resolveSlot(princessRaw)
+  local P2 = resolveSlot(droneRaw)
+
+  local child = {}
+  for _, trait in ipairs(traitList) do
+    local a = pickRawAllele(P1[trait])
+    local b = pickRawAllele(P2[trait])
+    if math.random() < 0.5 then a, b = b, a end -- random primary/secondary order
+    if trait == "species" and a and b and a.name and b.name
+        and speciesDominanceRank(b.name) > speciesDominanceRank(a.name) then
+      a, b = b, a -- express the dominant species as active (what the robot reads)
+    end
+    child[trait] = { active = a, inactive = b }
+  end
+  child._natural = princessRaw._natural
+  return child
+end
+
 -- Builds a raw genotype starting from makeStartingRaw's all-bad
 -- baseline, but with good alleles swapped in for ONLY the traits in
 -- goodTraitSet ({ trait = true, ... }) -- used for the "hard" seeding
@@ -565,16 +632,19 @@ function M.newWorld(config, sites, opts)
     templates = opts.templates,
   }
 
-  -- Directional pair index for mutation rolls: "<princessSpecies>|<droneSpecies>"
-  -- -> { { result, chance, conditions }, ... }. Built from the REAL GTNH
-  -- graph (opts.mutationGraph, a bee_mutation_graph.build result) when
-  -- given, else from the demo table above. allele1/princess is the first
-  -- key component, allele2/drone the second -- matching is NOT symmetric.
+  -- SYMMETRIC pair index for mutation rolls: "<speciesX>|<speciesY>" ->
+  -- { { result, chance, conditions }, ... }, with BOTH orders inserted. Built
+  -- from the REAL GTNH graph (opts.mutationGraph) when given, else the demo
+  -- table above. Species-pair order does NOT matter in Forestry: a Forest
+  -- princess + Meadows drone mutates exactly like Meadows princess + Forest
+  -- drone (confirmed by the user). The genome-level (A,D)/(C,B) cross-position
+  -- structure is modelled in M.mate; the recipe LOOKUP itself is order-free.
   world.mutationPairIndex = {}
   local function addPair(p, d, result, chance, conditions)
-    local key = p .. "|" .. d
-    world.mutationPairIndex[key] = world.mutationPairIndex[key] or {}
-    table.insert(world.mutationPairIndex[key], { result = result, chance = chance or 0, conditions = conditions or {} })
+    for _, key in ipairs({ p .. "|" .. d, d .. "|" .. p }) do
+      world.mutationPairIndex[key] = world.mutationPairIndex[key] or {}
+      table.insert(world.mutationPairIndex[key], { result = result, chance = chance or 0, conditions = conditions or {} })
+    end
   end
   if opts.mutationGraph then
     for result, recipes in pairs(opts.mutationGraph.byResult) do
@@ -585,6 +655,7 @@ function M.newWorld(config, sites, opts)
       for _, r in ipairs(recipes) do addPair(r.allele1.name, r.allele2.name, result, r.chance, {}) end
     end
   end
+  world.mutationBoost = world.mutationBoost or 1
 
   -- Whether every one of a recipe's special conditions is currently
   -- satisfied (see world.satisfiedConditions). Permissive by default.
@@ -1152,31 +1223,15 @@ function M.install(config, sites, opts)
         if a.workTicks >= a.workNeeded then
           -- One offspring: a fresh cross, plus a mutation roll if both
           -- parents match a recipe.
+          -- One offspring = one faithful Forestry mating (M.mate): SYMMETRIC
+          -- mutation with the real per-parent-slot (A,D)/(C,B) roll, template
+          -- replacement on success, and random-order Mendelian inheritance for
+          -- everything else. Replaces the old directional crossRaw+applyMutation
+          -- path, which silently dropped mutations whenever the parents sat in
+          -- the "wrong" princess/drone order.
           local function makeOffspring()
-            local child = crossRaw(world.traitList, a.princessRaw, a.droneRaw)
-            -- DIRECTIONAL mutation roll: the princess-slot species is
-            -- allele1, the drone-slot species is allele2 -- look up that
-            -- exact ordered pair (not the reverse). A conditioned recipe
-            -- only fires if its special conditions are currently met (see
-            -- world.conditionsMet). First matching successful roll wins.
-            local P = a.princessRaw.species.active.name
-            local D = a.droneRaw.species.active.name
-            local recipes = world.mutationPairIndex[P .. "|" .. D]
-            if recipes then
-              for _, recipe in ipairs(recipes) do
-                local boosted = math.min(100, (recipe.chance or 0) * (world.mutationBoost or 1))
-                if world.conditionsMet(recipe.conditions) and math.random(100) <= boosted then
-                  -- Mutation succeeded: the offspring becomes a purebred default
-                  -- bee of the result species, its alleles drawn from that
-                  -- species' template (how good alleles enter the pool). In
-                  -- species/mutation/rainbow modes the traitList is species-only,
-                  -- so only the species locus changes there. See applyMutation.
-                  applyMutation(child, recipe.result, world.templates, world.traitList)
-                  break
-                end
-              end
-            end
-            return child
+            return M.mate(world.traitList, a.princessRaw, a.droneRaw,
+              world.mutationPairIndex, world.templates, world.mutationBoost, world.conditionsMet)
           end
 
           -- The queen is CONSUMED (queen slot goes empty), and her

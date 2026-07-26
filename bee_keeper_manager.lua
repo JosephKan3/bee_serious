@@ -1273,6 +1273,16 @@ local function jobParentSpec(job)
     -- (V:) crossed with a hybrid DRONE carrying it (W:) -> ~25% pure offspring.
     return { pKey = "V:" .. job.species, pAllele = job.species, pVessel = true,
              dKey = "W:" .. job.species, dSpecies = job.species, dVessel = true }
+  elseif job.type == "seedDrone" then
+    -- Spread the species-allele into the DRONE pool: a carrier PRINCESS of X (V:)
+    -- x a PURE PARENT drone -> ~50% carrier drones (W:X), so `fix` can then run.
+    return { pKey = "V:" .. job.species, pAllele = job.species, pVessel = true,
+             dKey = "D:" .. job.drone, dSpecies = job.drone }
+  elseif job.type == "seedPrincess" then
+    -- Spread the species-allele into the PRINCESS pool: a PURE PARENT princess x a
+    -- carrier DRONE of X (W:) -> ~50% carrier princesses (V:X), so `fix` can run.
+    return { pKey = "P:" .. job.princess, pSpecies = job.princess, pVessel = false,
+             dKey = "W:" .. job.species, dSpecies = job.species, dVessel = true }
   end
   return nil
 end
@@ -1360,6 +1370,8 @@ local function executeJobAtApiary(config, site, job)
   if job.type == "grow" then return "growing " .. job.species .. " bank" end
   if job.type == "convert" then return "converting toward " .. job.to end
   if job.type == "fix" then return "fixing carriers into pure " .. job.species end
+  if job.type == "seedDrone" then return "seeding " .. job.species .. " carrier drones (x pure " .. job.drone .. ")" end
+  if job.type == "seedPrincess" then return "seeding " .. job.species .. " carrier princesses (pure " .. job.princess .. " x)" end
   local toward = (job.result ~= site.targetSpecies) and (" toward " .. job.result) or ""
   return "mutating " .. job.princess .. " x " .. job.drone .. toward
 end

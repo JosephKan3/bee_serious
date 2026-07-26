@@ -27,6 +27,9 @@
     { type="mutate", princess=A, drone=B, result=X }  -- breed A(princess) x B(drone) for X
     { type="grow",   species=X }                       -- breed X x X to grow X's drone bank
     { type="convert",to=Y }                            -- recycle a hybrid byproduct into Y
+    { type="fix",    species=X }                       -- carrier princess x carrier drone -> pure X
+    { type="seedDrone",   species=X, drone=B }         -- carrier princess x pure parent -> carrier DRONES
+    { type="seedPrincess",species=X, princess=A }      -- pure parent x carrier drone -> carrier PRINCESSES
     { type="done" }                                    -- target reached
     { type="blocked", need=<string> }                  -- can't proceed (e.g. need pristine base)
 --]]
@@ -121,14 +124,41 @@ function M.nextJob(state)
     -- mutate forever, banking hybrid after hybrid and never bootstrapping a pure
     -- (the real-hardware dead-end this fixes). fix also seeds the first pure DRONES
     -- (offspring drones are ~25% pure too), which then let `grow` build the bank.
-    local canFix = (convertible[X] or 0) >= 1 and (convertibleDrones[X] or 0) >= 1
+    local haveV = (convertible[X] or 0) >= 1        -- carrier PRINCESS of X exists
+    local haveW = (convertibleDrones[X] or 0) >= 1  -- carrier DRONE of X exists
+    local canFix = haveV and haveW
 
     if have.purePrincesses < tp then
       if have.purePrincesses < 1 and canFix then
         return { type = "fix", species = X }
       end
-      -- Need (more) X princesses -> mutate, if the parents can supply a
-      -- princess of A and a drone of B right now.
+      -- We have a carrier PRINCESS of X and already hold pure X DRONES (e.g. X's
+      -- princess line was just spent while its drone bank stands). Don't re-mutate:
+      -- cross the carrier against our own pure X drones (carrier x pure -> ~50%
+      -- pure) to restore the pure princess directly. `convert to=X` is exactly
+      -- V:X x D:X. This is the cheap, reliable renewal that keeps a line alive.
+      if haveV and have.pureDrones >= 1 then
+        return { type = "convert", to = X }
+      end
+      -- Only ONE carrier role of X exists and there's no pure X to breed against
+      -- yet (the usual state right after a mutation fires: a carrier princess, but
+      -- the sibling drones didn't roll X). Don't re-roll the low-chance MUTATION
+      -- hoping the other role drops -- that's the churn that stalls deep trees.
+      -- Species inherits like any allele: breed the carrier we HAVE against a PURE
+      -- PARENT (carrier x pure -> ~50% carriers) to spread X into the missing role,
+      -- then `fix` consolidates. Reliable, and it never burns a mutation attempt.
+      if have.purePrincesses < 1 then
+        if haveV and not haveW and bHasDrone then
+          -- carrier princess (V:X) x pure parent drone -> ~50% carrier DRONES.
+          return { type = "seedDrone", species = X, drone = B }
+        end
+        if haveW and not haveV and aHasPrincess then
+          -- pure parent princess x carrier drone (W:X) -> ~50% carrier PRINCESSES.
+          return { type = "seedPrincess", species = X, princess = A }
+        end
+      end
+      -- No carrier of X on hand at all -> mutate to acquire the first one, if the
+      -- parents can supply a princess of A and a drone of B right now.
       if aHasPrincess and bHasDrone then
         return { type = "mutate", princess = A, drone = B, result = X }
       end
@@ -147,6 +177,14 @@ function M.nextJob(state)
       -- No pure X drone yet: consolidate carriers to seed the first pure drones.
       if canFix then
         return { type = "fix", species = X }
+      end
+      -- Only one carrier role -> spread X into the missing role from pure parents
+      -- (same rationale as above), so `fix` can then seed the pure drones.
+      if haveV and not haveW and bHasDrone then
+        return { type = "seedDrone", species = X, drone = B }
+      end
+      if haveW and not haveV and aHasPrincess then
+        return { type = "seedPrincess", species = X, princess = A }
       end
       -- Have an X princess but no X drone yet -> mutate more X to seed drones.
       if aHasPrincess and bHasDrone then

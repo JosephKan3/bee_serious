@@ -109,11 +109,14 @@ do
     j.type == "mutate" and j.princess == "Common" and j.drone == "Cultivated" and j.result == "Noble", j.type)
 end
 
--- Parent renewal: Common princess spent (0) while building Cultivated -> rebuild Common first
+-- Parent renewal: Common princess spent (0) while building Cultivated, but its
+-- drone bank stands (8) and a carrier Common princess is around -> convert the
+-- carrier against our own pure Common drones (~50% pure) to renew the line. Much
+-- cheaper/more reliable than re-running the Forest x Wintry mutation.
 do
   local j = S.nextJob(state(withBase({ Common = b(0, 8), Cultivated = b(0, 0) }), { Common = 1 }))
-  check("Common princess spent -> re-mutate Common (rebuild) before advancing",
-    j.type == "mutate" and j.result == "Common", j.type)
+  check("Common princess spent (drones + carrier on hand) -> convert to renew, not re-mutate",
+    j.type == "convert" and j.to == "Common", j.type .. "/" .. tostring(j.to))
 end
 
 -- Determinism
@@ -153,10 +156,28 @@ do
 end
 
 do
-  -- Only a carrier PRINCESS (no carrier drone) -> can't fix yet; mutate more to
-  -- produce carrier drones.
+  -- Only a carrier PRINCESS (no carrier drone) -> can't fix yet. Don't re-roll the
+  -- low-chance mutation: spread X into the drone pool by breeding the carrier
+  -- princess against a PURE PARENT drone (Wintry) -- ~50% carrier drones, reliable.
   local j = S.nextJob(stateD(withBase({}), { Common = 1 }, {}))
-  check("no fix with only a carrier princess -> mutate to make more carriers",
+  check("only a carrier princess -> seedDrone (carrier x pure parent), not mutate",
+    j.type == "seedDrone" and j.species == "Common" and j.drone == "Wintry",
+    j.type .. "/" .. tostring(j.drone))
+end
+
+do
+  -- Only a carrier DRONE (no carrier princess) -> spread X into the princess pool
+  -- by breeding a PURE PARENT princess (Forest) against the carrier drone.
+  local j = S.nextJob(stateD(withBase({}), {}, { Common = 1 }))
+  check("only a carrier drone -> seedPrincess (pure parent x carrier)",
+    j.type == "seedPrincess" and j.species == "Common" and j.princess == "Forest",
+    j.type .. "/" .. tostring(j.princess))
+end
+
+do
+  -- No carriers at all yet -> mutate to acquire the first carrier.
+  local j = S.nextJob(stateD(withBase({}), {}, {}))
+  check("no carriers yet -> mutate to acquire the first one",
     j.type == "mutate" and j.result == "Common", j.type)
 end
 

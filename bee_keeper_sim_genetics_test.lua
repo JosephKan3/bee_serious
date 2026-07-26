@@ -129,6 +129,64 @@ do
       and child.fertility.active == 1)
 end
 
+-- ============================================================
+-- M.mate: the faithful Forestry mating used by the sim's apiaries.
+--  * mutation lookup is SYMMETRIC (princess/drone species order irrelevant)
+--  * a successful mutation replaces a whole parent slot with the pure result
+--    template, so the offspring carries the result species on >=1 allele
+--  * pure x pure of the SAME species always stays pure
+-- ============================================================
+
+-- A symmetric pair index like bee_keeper_sim builds internally: both orders.
+local function symIndex(a, b, result, chance)
+  local idx = {}
+  for _, key in ipairs({ a .. "|" .. b, b .. "|" .. a }) do
+    idx[key] = { { result = result, chance = chance, conditions = {} } }
+  end
+  return idx
+end
+
+do
+  -- Forest x Meadows -> Common at 100% (guaranteed), tried BOTH parent orders.
+  local idx = symIndex("Forest", "Meadows", "Common", 100)
+  local templates = {} -- no trait overrides; species-only tracking
+  math.randomseed(2024)
+  local forestFirst, meadowsFirst = 0, 0
+  for _ = 1, 200 do
+    local c1 = Sim.mate({ "species" }, pureParent("Forest"), pureParent("Meadows"), idx, templates, 1)
+    local c2 = Sim.mate({ "species" }, pureParent("Meadows"), pureParent("Forest"), idx, templates, 1)
+    if c1.species.active.name == "Common" or c1.species.inactive.name == "Common" then forestFirst = forestFirst + 1 end
+    if c2.species.active.name == "Common" or c2.species.inactive.name == "Common" then meadowsFirst = meadowsFirst + 1 end
+  end
+  check("mate: Forest princess x Meadows drone yields Common carriers", forestFirst > 0, "got " .. forestFirst)
+  check("mate: Meadows princess x Forest drone ALSO yields Common (symmetric)", meadowsFirst > 0, "got " .. meadowsFirst)
+end
+
+do
+  -- Pure x pure of the SAME species: no recipe for (X,X), so always pure X.
+  local idx = symIndex("Forest", "Meadows", "Common", 100)
+  math.randomseed(77)
+  local allPure = true
+  for _ = 1, 100 do
+    local c = Sim.mate({ "species" }, pureParent("Common"), pureParent("Common"), idx, {}, 1)
+    if not (c.species.active.name == "Common" and c.species.inactive.name == "Common") then allPure = false end
+  end
+  check("mate: pure Common x pure Common stays pure Common", allPure)
+end
+
+do
+  -- Zero-chance recipe never fires -> offspring is a plain Mendelian hybrid,
+  -- never the result species.
+  local idx = symIndex("Forest", "Meadows", "Common", 0)
+  math.randomseed(5)
+  local sawCommon = false
+  for _ = 1, 100 do
+    local c = Sim.mate({ "species" }, pureParent("Forest"), pureParent("Meadows"), idx, {}, 1)
+    if c.species.active.name == "Common" or c.species.inactive.name == "Common" then sawCommon = true end
+  end
+  check("mate: 0%-chance recipe never produces the result species", not sawCommon)
+end
+
 print("")
 if failures == 0 then
   print("ALL TESTS PASSED")
