@@ -86,6 +86,7 @@ local Traitmax = require("bee_traitmax")
 local Templates = require("bee_templates")
 local Program = require("bee_program")
 local Combine = require("bee_combine")
+local Pool = require("bee_pool")
 
 local M = {}
 M.Nav = Nav
@@ -368,11 +369,118 @@ local function combineOpts(site)
   }
 end
 
+-- Keep the CARGO breeding pool bounded and role-balanced (bee_pool). Each mating
+-- yields 1 princess but 2 drones, so an unmanaged cargo floods with drones: once
+-- full, offspring princesses can't land, the princess pool drains to zero, and
+-- the loop freezes (the 8/9 convergence tail -- see docs/perfect_combine_design.md).
+-- Before harvesting fresh offspring we hold cargo at top-K princesses + top-K
+-- drones by combine fitness, flying the excess to OVERFLOW storage (genes kept,
+-- not voided) so there's always room for the next generation. Gated on cargo
+-- pressure so we don't make a needless storage trip every cycle.
+--
+-- protect: never discard (and don't let it consume a role cap) any bee that is
+-- homozygous-good on ALL coverable traits -- that's the renewable good-allele
+-- donor (our only allele source) and any already-perfect bee (finished progress).
+-- Only the FEW highest-fitness working-trait carriers survive the cap; naive
+-- "keep every carrier" over-protects when the donor has spread a trait widely
+-- (nothing gets discarded, cargo stays full).
+local function pruneCombinePool(config, opts)
+  local free = 0
+  for _, slot in ipairs(config.workingSlots) do
+    if invCtrl().getStackInInternalSlot(slot) == nil then free = free + 1 end
+  end
+  if free >= (config.perfectMinFreeCargo or 6) then return 0 end
+
+  -- Gather the ANALYZED pool (genes visible) plus the slots holding UNANALYZED
+  -- drones. Analysis needs honey; when honey lags, offspring pile up unanalyzed
+  -- and INVISIBLE to a genome-based prune, silently re-flooding cargo. So we also
+  -- shed excess unanalyzed drones as a safety valve (below) -- the loop degrades
+  -- gracefully instead of hard-freezing when analysis throughput can't keep up.
+  local pool, unanalyzedDrones = {}, {}
+  for _, slot in ipairs(config.workingSlots) do
+    local stack = invCtrl().getStackInInternalSlot(slot)
+    local ind = readIndividual(stack)
+    if ind then
+      pool[#pool + 1] = {
+        _slot = slot,
+        _princess = isPrincessOrQueenStack(stack),
+        _g = toCombineGenome(ind, opts.traitOrder),
+      }
+    elseif stack and stack.individual and isDroneStack(stack) then
+      unanalyzedDrones[#unanalyzedDrones + 1] = slot
+    end
+  end
+
+  local nTraits = #opts.traitOrder
+  -- protect ONLY a truly-finished perfect bee (species-pure target AND every
+  -- coverable trait homozygous-good). It must NOT protect all-good SPECIES-HYBRIDS:
+  -- once the donor's alleles spread, most of the pool becomes all-good-but-hybrid,
+  -- and protecting all of them re-creates the very over-protection freeze this
+  -- module exists to prevent (nothing left discardable -> cargo stays full).
+  -- Hybrids and donors instead compete on the role caps by fitness; the renewable
+  -- donor bank (traitmax max bee) keeps the good-allele source stocked.
+  local function isPerfect(g)
+    if opts.speciesKey(g.species.active) ~= opts.target or opts.speciesKey(g.species.inactive) ~= opts.target then
+      return false
+    end
+    for _, t in ipairs(opts.traitOrder) do
+      if not (opts.isGood(t, g[t].active) and opts.isGood(t, g[t].inactive)) then return false end
+    end
+    return true
+  end
+  local _, discard = Pool.balance(pool, {
+    isPrincess = function(i) return i._princess end,
+    fitness = function(i) return Combine.correctAlleles(i._g, nTraits, opts) end,
+    maxPrincess = config.perfectMaxPrincess or 6,
+    maxDrone = config.perfectMaxDrone or 8,
+    protect = function(i) return isPerfect(i._g) end,
+  })
+
+  -- Shape discards for dumpEntriesAt ({ drone = { id, _slot } }); slot doubles as
+  -- id (keepId nil -> nothing withheld).
+  local entries = {}
+  for _, i in ipairs(discard) do entries[#entries + 1] = { drone = { id = i._slot, _slot = i._slot } } end
+
+  -- Safety valve: if the analyzed prune didn't free enough (cargo is choked with
+  -- as-yet-unanalyzed offspring drones the genome prune can't see), shed the
+  -- surplus unanalyzed drones too, keeping a small buffer. They go to overflow
+  -- storage like everything else, so they can be pulled back and analyzed once
+  -- there's room -- no genes voided.
+  local target = config.perfectMinFreeCargo or 6
+  local projectedFree = free + #entries
+  local keepUnanalyzed = config.perfectMaxUnanalyzed or 4
+  local i = keepUnanalyzed + 1
+  while projectedFree < target and i <= #unanalyzedDrones do
+    entries[#entries + 1] = { drone = { id = unanalyzedDrones[i], _slot = unanalyzedDrones[i] } }
+    projectedFree = projectedFree + 1
+    i = i + 1
+  end
+
+  if #entries == 0 then return 0 end
+  -- Overflow storage preferred (genes kept); fall back to trash only if no
+  -- storage is configured.
+  if config.storagePos then
+    M.dumpToStorage(config, entries, nil)
+  elseif config.trashPos then
+    M.dumpToTrash(config, entries, nil)
+  end
+  return #entries
+end
+
 function M.runPerfectSite(config, site)
   local opts = combineOpts(site)
   if not site.targetSpecies or #opts.traitOrder == 0 then
     return "perfect_no_target_or_traits"
   end
+  -- Keep the cargo breeding pool bounded FIRST, every visit -- BEFORE anything
+  -- else and independent of apiary state. This must not be gated behind a mating
+  -- completing: a full cargo blocks seeding new matings, so nothing completes, so
+  -- a completion-gated prune would never run again -- a deadlock that froze the
+  -- pool at 8/9 (drones flood cargo, offspring princesses can't land). Pruning up
+  -- front guarantees free slots for this visit's harvest and the next generation.
+  -- (May fly to overflow storage; the gotoSite below returns us to the apiary.)
+  pruneCombinePool(config, opts)
+
   Status.setStep("Heading to " .. (site.name or "?") .. " (perfect " .. site.targetSpecies .. ")")
   if not gotoSite(site) then return "nav_failed_to_apiary" end
   local down = sides().down

@@ -101,6 +101,7 @@ function Updater:downloadFiles()
     "bee_traitmax.lua",
     "bee_program.lua",
     "bee_combine.lua",
+    "bee_pool.lua",
     "bee_allele_values.lua",
     "bee_templates.lua",
     "bee_storage.lua",

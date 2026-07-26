@@ -48,7 +48,39 @@ stays all-good). It supplies the good alleles that species-X drones lack.
 Validated in `scripts/` experiments (crossRaw-level): serial imprint reached
 9/9 X-pure by trait 6 of 9; all-at-once variants reached 0/9–4/9.
 
-## Wired (v0.5.0) -- reaches 8/9, one-trait tail remains
+## SOLVED (v0.5.1) -- full 9/9 via the bounded-pool subsystem (bee_pool.lua)
+
+The one-trait tail is closed. It was never a scoring problem; it was breeding-loop
+DYNAMICS, fixed by a bounded, role-balanced, evolving cargo pool plus adequate
+analysis throughput. `bee_pool.lua` (pure) decides each visit which cargo bees to
+KEEP and which to send to overflow storage; `pruneCombinePool` in the manager
+wires it into `M.runPerfectSite`. Reaches 9/9 by ~cycle 20 in the e2e (was a
+dead-flat 8/9 for 1000+ cycles).
+
+Three compounding causes had to be fixed together -- each alone still froze:
+
+1. **Prune must run UP FRONT every visit, not gated behind a mating completion.**
+   A full cargo blocks seeding new matings, so nothing completes, so a
+   completion-gated prune never runs again -- a hard deadlock. `pruneCombinePool`
+   is the first thing `runPerfectSite` does, independent of apiary state.
+2. **Protect ONLY a truly-finished perfect bee (species-pure AND all-good), never
+   all-good SPECIES-HYBRIDS.** Once the donor's alleles spread, most of the pool
+   is all-good-but-hybrid; protecting all of them leaves nothing discardable and
+   cargo stays full (the documented over-protection failure mode, re-created if
+   `protect = allGood`). Hybrids and donors compete on the role caps by fitness
+   (top ~6 princesses + ~8 drones, `Combine.correctAlleles` over all traits).
+3. **Analysis throughput (honey) must keep up.** Analyzing consumes honey;
+   unanalyzed offspring are INVISIBLE to the genome-based pool and silently
+   re-flood cargo. Real GTNH honey is renewable (harvested combs), so a live
+   deployment must keep it stocked (the e2e models this). A safety valve also
+   sheds surplus UNANALYZED drones under pressure, so a honey lag degrades
+   gracefully (cargo held at the free-slot target, ~8/9) instead of hard-freezing.
+
+Config knobs (defaults): `perfectMaxPrincess=6`, `perfectMaxDrone=8`,
+`perfectMinFreeCargo=6` (prune trigger + free-slot target), `perfectMaxUnanalyzed=4`.
+Discards go to `storagePos` (overflow, genes kept) or `trashPos` if no storage.
+
+## History: v0.5.0 -- reached 8/9, one-trait tail (kept for context)
 
 `M.runPerfectSite` drives the perfect phase with `bee_combine`. Two scoring rules
 were essential (found by debugging the wiring):

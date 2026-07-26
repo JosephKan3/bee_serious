@@ -6,12 +6,19 @@
 
   Naive species mode plateaued at 4/9 here (see git history / docs/
   perfect_combine_design.md). The wired serial-imprint handler preserves species
-  purity and imprints the donor's alleles into X, reaching NEAR-perfect (>= 8/9)
-  -- a large gain over naive. The final trait is a convergence tail: the pure
-  pool experiment reaches 9/9 via random-pairing diversity that the deterministic
-  one-pair-per-apiary hardware loop lacks; closing it needs pairing diversity /
-  complementarity selection (documented follow-up). This asserts the strong
-  progress that holds.
+  purity and imprints the donor's alleles into X. Reaching FULL 9/9 needed the
+  bounded-pool subsystem (bee_pool): each mating yields 1 princess but 2 drones,
+  so an unmanaged cargo floods with drones, offspring princesses can't land, the
+  princess pool drains to zero, and the loop froze at the 8/9 tail. bee_pool holds
+  cargo at top-K princesses + top-K drones by fitness (excess -> overflow storage),
+  pruned up front every visit so it can't deadlock behind a mating completion.
+
+  Analysis throughput matters too: analyzing a bee consumes honey, and unanalyzed
+  offspring are invisible to the genome-based pool (they silently re-flood cargo).
+  In real GTNH honey is renewable (harvested combs), so this test keeps the honey
+  supply stocked -- modelling a maintained supply -- to test the GENETICS
+  convergence rather than a honey-starvation artifact. With that, the perfect
+  phase reaches full 9/9.
 --]]
 
 package.path = package.path .. ";./?.lua"
@@ -109,22 +116,35 @@ local function topUpDonorsInCargo()
   while dp < 1 and fi <= #free do Sim.world.drone.inventory[free[fi]] = donor("princess"); fi = fi + 1; dp = dp + 1 end
 end
 
-local NEAR = #coverable - 1 -- near-perfect target (the tail trait is a follow-up)
+-- Keep the honey supply stocked (renewable in-game via harvested combs) so
+-- offspring get analyzed and become visible to the bounded pool -- otherwise
+-- unanalyzed drones flood cargo and stall progress (a supply artifact, not a
+-- genetics limit; see header).
+local function topUpHoney()
+  local h = Sim.world.drone.inventory[config.honeySlot]
+  if not h or (h.size or 0) < 8 then
+    Sim.world.drone.inventory[config.honeySlot] = { name = "forestry:honey_drop", size = 64, maxSize = 64 }
+  end
+end
+
+local GOAL = #coverable -- FULL perfect: every coverable trait homozygous-good, species-pure
+local MAXC = 2000
 local realprint = print; _G.print = function() end
 local reachedAt
-for c = 1, 1500 do
+for c = 1, MAXC do
+  topUpHoney()
   topUpDonorsInCargo()
   M.runCycle(config)
-  if bestXPureGood() >= NEAR then reachedAt = c; break end
+  if bestXPureGood() >= GOAL then reachedAt = c; break end
 end
 _G.print = realprint
 
 local reached = bestXPureGood()
 check("perfect phase imprints the donor's alleles into species-pure " .. TARGET ..
-  " -- near-perfect (>= " .. NEAR .. "/" .. #coverable .. ", well past the naive 4/9 plateau)",
-  reached >= NEAR, "best X-pure good = " .. reached .. "/" .. #coverable ..
-    (reachedAt and (" at cycle " .. reachedAt) or " (not reached in 1500)"))
-realprint(string.format("  (serial-imprint perfect phase: reached %d/%d%s; final trait is the documented convergence tail)",
+  " -- FULL perfect (" .. GOAL .. "/" .. #coverable .. ", well past the naive 4/9 plateau)",
+  reached >= GOAL, "best X-pure good = " .. reached .. "/" .. #coverable ..
+    (reachedAt and (" at cycle " .. reachedAt) or (" (not reached in " .. MAXC .. ")")))
+realprint(string.format("  (bounded-pool perfect phase: reached %d/%d%s)",
   reached, #coverable, reachedAt and (" at cycle " .. reachedAt) or ""))
 
 print("")
