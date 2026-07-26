@@ -972,6 +972,13 @@ function M.isSpeciesPurebred(individual, species)
   return BB.traitState(g, "species") == "GG"
 end
 
+-- DEPRECATED / NO LONGER WIRED IN (kept for reference -- do NOT re-add to the
+-- genebank loop). It junked ALL hybrid drones every cycle, which the cargo-resident
+-- redesign (v0.5.7/0.5.8) needs as `fix`-job carrier fodder; it forced a storage
+-- round-trip per cycle and left the lazy census stale. Cargo bounding is now done
+-- by M.offloadSurplus (pressure-gated, cache-refreshing). See the note at the
+-- runMutationSite genebank branch for the full rationale.
+--
 -- Junk the useless hybrid (non-purebred) byproducts of mutation crosses so they
 -- don't pile up and crowd the banks out of cargo. What's junked:
 --   * every hybrid DRONE (pure fodder -- breeding it drifts a bank), and
@@ -1562,14 +1569,25 @@ function M.runMutationSite(config, site)
     end
   end
 
-  -- Genebank / rainbow: junk hybrid byproducts, then hand off to the bank
-  -- SCHEDULER (M.runGenebankSchedule) -- it builds each species' purebred bank
-  -- bottom-up to full reserve, converts pristine hybrids to renew supply, and
-  -- only spends a bank once it's stocked. Rainbow reuses the same machinery,
-  -- just cycling the target through every reachable species.
+  -- Genebank / rainbow: hand straight off to the bank SCHEDULER
+  -- (M.runGenebankSchedule) -- it builds each species' purebred bank bottom-up to
+  -- full reserve, converts pristine hybrids to renew supply, and only spends a bank
+  -- once it's stocked. Rainbow reuses the same machinery, just cycling the target
+  -- through every reachable species.
+  --
+  -- NOTE: we deliberately DO NOT call M.junkHybrids here anymore. It predates the
+  -- cargo-resident working set (v0.5.7/0.5.8) and actively breaks it: it flew to
+  -- storage EVERY cycle to dump all hybrid DRONES -- but those are exactly the
+  -- carrier fodder (census "W:" keys) the scheduler's `fix` job consumes to
+  -- bootstrap the first pure of a mutated species. So it forced a guaranteed
+  -- storage round-trip (dump, then `fix` re-fetches the same drones), starved the
+  -- 2nd apiary of resident fix-parents, and -- writing to storage WITHOUT updating
+  -- the lazy census cache -- left the scheduler's convertibleDrones count stale,
+  -- causing mis-picked done/blocked/fetch-fail (harvest with no new pair loaded).
+  -- Cargo bounding is now handled correctly by M.offloadSurplus inside the
+  -- scheduler: pressure-gated, cache-refreshing, and it keeps the working set
+  -- (incl. carriers) resident. Hybrids therefore stay in cargo as fix fodder.
   if config.genebank or site.mode == "rainbow" then
-    M.junkHybrids(config, site)
-    if not gotoSite(site) then return "nav_failed_after_junk" end
     return M.runGenebankSchedule(config, site)
   end
 
