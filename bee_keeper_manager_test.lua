@@ -1861,6 +1861,70 @@ do
     M.isSpeciesBanked(noCensus, "Mystical") == false)
 end
 
+-- ============================================================
+-- Test: cargo-resident working-set helpers (efficiency loop)
+-- ============================================================
+
+do -- residentPrincessTarget = min(#apiaries, floor(usable/2)), >= 1
+  local base = { workingSlots = { 1,2,3,4,5,6,7,8,9,10,11,12 }, honeySlot = 12 } -- usable 11 -> byCargo 5
+  local function cfg(nSites)
+    local sites = {}
+    for i = 1, nSites do sites[i] = { name = "s" .. i } end
+    local c = { sites = sites }
+    for k, v in pairs(base) do c[k] = v end
+    return c
+  end
+  check("princess target capped by #apiaries (3 sites -> 3)", M.residentPrincessTarget(cfg(3)) == 3)
+  check("princess target capped by cargo/2 (8 sites -> 5)", M.residentPrincessTarget(cfg(8)) == 5)
+  check("princess target falls back to cargo/2 when no sites", M.residentPrincessTarget(cfg(0)) == 5)
+end
+
+do -- mergeSlotsByKey concatenates entry lists across sources
+  local a = { ["D:Forest"] = { { pos = 1, slot = 2 } } }
+  local b = { ["D:Forest"] = { { pos = "cargo", slot = 3 } }, ["P:Forest"] = { { pos = 2, slot = 4 } } }
+  local m = M.mergeSlotsByKey(a, b)
+  check("mergeSlotsByKey unions keys", m["P:Forest"] ~= nil and m["D:Forest"] ~= nil)
+  check("mergeSlotsByKey concatenates same-key entries", #m["D:Forest"] == 2)
+end
+
+do -- cargoFreeSlots counts empty working slots, excluding the honey slot
+  world.agentInventory = {}
+  world.agentInventory[1] = mockDroneStack({ species = { name = "Forest" } }, { species = { name = "Forest" } }, true)
+  world.agentInventory[2] = mockDroneStack({ species = { name = "Forest" } }, { species = { name = "Forest" } }, true)
+  local config = { workingSlots = { 1, 2, 3, 4, 5, 6 }, honeySlot = 6 }
+  -- occupied: 1,2 ; honey slot 6 excluded ; free among {3,4,5} = 3
+  check("cargoFreeSlots ignores honey slot and counts empties", M.cargoFreeSlots(config) == 3,
+    "got " .. tostring(M.cargoFreeSlots(config)))
+end
+
+do -- offloadSurplus is a no-op when cargo has room to extract
+  world.agentInventory = {}
+  world.apiaries = {}
+  world.agentInventory[1] = mockDroneStack({ species = { name = "Forest" } }, { species = { name = "Forest" } }, true)
+  local config = { workingSlots = { 1, 2, 3, 4, 5, 6, 7, 8 }, honeySlot = 8,
+    storagePos = { x = 0, z = 0 }, storageSlotCount = 20, extractReserve = 3 }
+  -- free among {1..7} minus occupied(1) = 6 >= reserve 3 -> not pressured
+  check("offloadSurplus deposits nothing when not pressured", M.offloadSurplus(config) == 0)
+  check("offloadSurplus left the bee in cargo", world.agentInventory[1] ~= nil)
+end
+
+do -- offloadSurplus, under pressure, deposits surplus drones but keeps the working set
+  world.agentInventory = {}
+  world.apiaries = {}
+  world.dronePos = { x = 5, z = 5 }
+  for s = 1, 7 do
+    world.agentInventory[s] = mockDroneStack({ species = { name = "Forest" } }, { species = { name = "Forest" } }, true)
+  end
+  local config = { workingSlots = { 1, 2, 3, 4, 5, 6, 7, 8 }, honeySlot = 8,
+    storagePos = { x = 0, z = 0 }, storageSlotCount = 20, extractReserve = 3, workingDroneStacks = 4 }
+  -- 7 drones, 0 free (< reserve 3) -> pressured. keep 4 drone stacks -> deposit 3.
+  local dropped = M.offloadSurplus(config)
+  check("offloadSurplus deposited the 3 surplus drones", dropped == 3, "dropped=" .. tostring(dropped))
+  local left = 0
+  for s = 1, 7 do if world.agentInventory[s] ~= nil then left = left + 1 end end
+  check("offloadSurplus kept the working set of 4 drone stacks resident", left == 4, "left=" .. tostring(left))
+end
+
 print("")
 if failures == 0 then
   print("ALL TESTS PASSED")

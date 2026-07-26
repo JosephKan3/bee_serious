@@ -1127,6 +1127,84 @@ function M.mergeConvertible(a, b)
   return out
 end
 
+-- Pure: merge fetch indices ({ key -> { {pos,slot}, ... } }), concatenating the
+-- entry lists. Order doesn't matter -- fetchJobParents.pick() prefers a
+-- pos="cargo" entry regardless of position.
+function M.mergeSlotsByKey(...)
+  local out = {}
+  for _, src in ipairs({ ... }) do
+    for k, list in pairs(src or {}) do
+      out[k] = out[k] or {}
+      for _, e in ipairs(list) do out[k][#out[k] + 1] = e end
+    end
+  end
+  return out
+end
+
+-- Empty working slots available for new bees (excludes the honey slot). Drives
+-- the "cargo too full to extract -> offload" decision.
+function M.cargoFreeSlots(config)
+  local n = 0
+  for _, cslot in ipairs(config.workingSlots) do
+    if cslot ~= config.honeySlot and invCtrl().getStackInInternalSlot(cslot) == nil then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- The resident PRINCESS target: enough to feed every apiary in one pass, but
+-- never more than half the usable cargo (the other half is for donor drone
+-- stacks + offspring extraction). min(#apiaries, floor(usable/2)), at least 1.
+function M.residentPrincessTarget(config)
+  local usable = #config.workingSlots - (config.honeySlot and 1 or 0)
+  local byCargo = math.floor(usable / 2)
+  local byApiaries = #(config.sites or {})
+  return math.max(1, math.min(byApiaries > 0 and byApiaries or byCargo, byCargo))
+end
+
+-- Deposit SURPLUS cargo bees to storage (genes kept) ONLY when cargo is too full
+-- to extract offspring -- the pressure valve for the cargo-resident loop. Keeps a
+-- working set resident: up to residentPrincessTarget princesses, plus the biggest
+-- drone stacks (config.workingDroneStacks, so the current donor stack -- the one
+-- just fetched at 64 -- stays for probabilistic retries); everything beyond that
+-- is deposited. Never trashes; the whole point is to preserve, just off-cargo.
+-- Returns the number deposited.
+function M.offloadSurplus(config)
+  local reserve = config.extractReserve or 3
+  if M.cargoFreeSlots(config) >= reserve then return 0 end -- not pressured
+
+  local princesses, drones = {}, {}
+  for _, cslot in ipairs(config.workingSlots) do
+    if cslot ~= config.honeySlot then
+      local bee = classifyBee(invCtrl().getStackInInternalSlot(cslot))
+      if bee then
+        local rec = { slot = cslot, size = bee.size }
+        if bee.role == "princess" then princesses[#princesses + 1] = rec
+        elseif bee.role == "drone" then drones[#drones + 1] = rec end
+      end
+    end
+  end
+  -- Keep the LARGEST drone stacks (the fetched 64-donor sticks around); shed the
+  -- small offspring piles first.
+  table.sort(drones, function(x, y) return x.size > y.size end)
+
+  local keepP = M.residentPrincessTarget(config)
+  local keepD = config.workingDroneStacks or 4
+  local toDeposit = {}
+  for i, p in ipairs(princesses) do
+    if i > keepP then toDeposit[#toDeposit + 1] = { _slot = p.slot } end
+  end
+  for i, d in ipairs(drones) do
+    if i > keepD then toDeposit[#toDeposit + 1] = { _slot = d.slot } end
+  end
+  if #toDeposit == 0 then return 0 end
+
+  local dropped, pending = M.depositBeesAcrossStores(config, toDeposit)
+  if #pending > 0 then M.onStorageFull(config, pending) end
+  return dropped
+end
+
 -- Deposit ALL cargo bees into the network, then re-scan. The heavy full-sync
 -- (a storage round trip every call) -- kept for the offload path and any caller
 -- that wants the banks flushed. The lazy genebank loop no longer calls this every
@@ -1233,16 +1311,35 @@ local function conditionsForResult(plan, result)
   return nil
 end
 
--- Loads the two just-fetched parents from cargo into the apiary and breeds them.
--- After syncBanksToStorage cleared cargo, it holds exactly one princess + one
--- drone (plus honey), so they're found by role.
+-- Does a cargo bee satisfy the job's princess / drone requirement? SPECIES-aware
+-- (cargo now holds a resident working set of many species, not just the fetched
+-- pair) -- a pure requirement matches a purebred of that species; a vessel
+-- requirement matches any carrier of the allele.
+local function princessMatches(bee, spec)
+  if spec.pVessel then return bee.alleles[spec.pAllele] == true end
+  return bee.pure and bee.species == spec.pSpecies
+end
+local function droneMatches(bee, spec)
+  if spec.dVessel then return bee.alleles[spec.dSpecies] == true end
+  return bee.pure and bee.species == spec.dSpecies
+end
+
+-- Loads the job's two parents from cargo into the apiary and breeds them. Selects
+-- the SPECIFIC princess/drone the job wants (by species/allele) out of whatever
+-- resident working set cargo currently holds.
 local function executeJobAtApiary(config, site, job)
   local down = sides().down
+  local spec = jobParentSpec(job)
+  if not spec then return "unknown_job_type" end
   local pSlot, dSlot
   for _, cslot in ipairs(config.workingSlots) do
-    local stack = invCtrl().getStackInInternalSlot(cslot)
-    if isPrincessOrQueenStack(stack) then pSlot = pSlot or cslot
-    elseif isDroneStack(stack) then dSlot = dSlot or cslot end
+    if cslot ~= config.honeySlot then
+      local bee = classifyBee(invCtrl().getStackInInternalSlot(cslot))
+      if bee then
+        if not pSlot and bee.role == "princess" and princessMatches(bee, spec) then pSlot = cslot end
+        if not dSlot and bee.role == "drone" and droneMatches(bee, spec) then dSlot = cslot end
+      end
+    end
   end
   if not pSlot or not dSlot then return "job_parents_missing_in_cargo" end
 
@@ -1330,11 +1427,20 @@ function M.traitmaxAcquiring(config, site)
     and config.templates ~= nil
 end
 
--- One genebank-scheduled decision+action for a mutation OR rainbow site: sync
--- banks to storage, choose the target (fixed for mutation, next-unbanked for
--- rainbow), ask the scheduler for the next job, fetch its parents, and breed them.
+-- One genebank-scheduled decision+action for a mutation OR rainbow site.
+-- CARGO-FIRST + LAZY CENSUS: it trusts the cached storage census between visits
+-- and reads live cargo for free, so the scheduler sees the accurate TOTAL without
+-- a storage trip. It breeds straight from the resident working set when the job's
+-- parents are already in cargo, and only flies to storage when a parent is missing
+-- or cargo is too full to extract offspring (then it offloads surplus + refetches).
 function M.runGenebankSchedule(config, site)
-  local summary, convertible, slotsByKey, convertibleDrones = M.syncBanksToStorage(config)
+  -- Seed the storage census once; after that it's refreshed only on actual
+  -- storage visits (below), which is the only time storage contents change.
+  if not config._bankCensus then M.scanStorageCensus(config) end
+  local cargoSummary, cargoConv, cargoKeys, cargoConvD = M.cargoCensus(config)
+  local summary = M.mergeCensus(config._bankCensus, cargoSummary)
+  local convertible = M.mergeConvertible(config._bankConvertible, cargoConv)
+  local convertibleDrones = M.mergeConvertible(config._bankConvertibleDrones, cargoConvD)
 
   local target, remaining = site.targetSpecies, nil
   if site.mode == "rainbow" then
@@ -1374,6 +1480,24 @@ function M.runGenebankSchedule(config, site)
     if conditions and #conditions > 0 and not M.gateSpecialConditions(config, conditions, job.result) then
       return "awaiting_special_condition:" .. table.concat(conditions, "; ")
     end
+  end
+
+  -- Decide whether this attempt needs storage at all. If both parents are already
+  -- resident and cargo has room to extract, breed with NO storage trip -- the
+  -- whole point of the working set. Otherwise make ONE visit: offload surplus if
+  -- we're choked, then re-scan (contents just changed) and refetch. The drone
+  -- parent comes back as a full stack, so subsequent probabilistic retries stay
+  -- resident.
+  local resident = jobParentsResident(job, cargoKeys)
+  local pressured = M.cargoFreeSlots(config) < (config.extractReserve or 3)
+  local slotsByKey
+  if resident and not pressured then
+    slotsByKey = cargoKeys
+  else
+    if pressured then M.offloadSurplus(config) end
+    M.scanStorageCensus(config) -- refresh cache (+ _bankSlotsByKey) after any deposit
+    local _, _, freshCargoKeys = M.cargoCensus(config)
+    slotsByKey = M.mergeSlotsByKey(config._bankSlotsByKey, freshCargoKeys)
   end
 
   local fetched, why = fetchJobParents(config, job, slotsByKey)

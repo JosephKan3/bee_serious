@@ -35,6 +35,24 @@ return {
   -- beyond just honeySlot.
   workingSlots = nil,
 
+  -- Cargo-resident working set (genebank/mutation/traitmax/rainbow sites). The
+  -- robot no longer banks everything and refetches one pair every cycle; it keeps
+  -- a working set in cargo, breeds straight from it, and only visits storage when
+  -- a parent is missing or cargo is too full to extract. Tunables (all optional):
+  --   fetchDroneStack     -- how many drones to pull per fetch (default 64, a full
+  --                          stack) so probabilistic mutation retries run from
+  --                          cargo without another storage trip.
+  --   extractReserve      -- keep at least this many free cargo slots for
+  --                          extracting offspring; drop below it and the robot
+  --                          offloads surplus to storage (default 3).
+  --   workingDroneStacks  -- how many drone stacks to keep resident when offloading
+  --                          under pressure (the largest are kept -- i.e. the
+  --                          freshly-fetched donor stack survives) (default 4).
+  -- Resident princesses are auto-sized to min(#apiaries, floor(usableCargo/2)).
+  fetchDroneStack = nil,
+  extractReserve = nil,
+  workingDroneStacks = nil,
+
   -- Where an apiary's offspring/product output (combs, drones, the
   -- replacement princess) lives. Leave nil -- M.harvestSite auto-derives
   -- this as "every slot from 3 to the apiary's real reported size" via
