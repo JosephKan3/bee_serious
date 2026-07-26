@@ -27,6 +27,11 @@
     lua bee_keeper_scenario_sim.lua            -- step mode (prompt each action)
     lua bee_keeper_scenario_sim.lua run 5      -- auto-run 5 cycles (no prompts)
     lua bee_keeper_scenario_sim.lua 30         -- step mode, up to 30 cycles
+    lua bee_keeper_scenario_sim.lua replay DIR -- validate against a finished MC trace
+                                                  (DIR holds bee_trace.dat)  -- BATCH
+    lua bee_keeper_scenario_sim.lua live DIR   -- tail DIR/bee_trace.dat WHILE Minecraft
+                                                  writes it: diff + import RNG per step,
+                                                  blocking for MC to catch up  -- LIVE
 
   CONTAINER VIEW: after every action it prints the detailed contents of every
   CONTAINER (the 4 ApChests + the 2 apiaries) plus the robot's cargo -- slot
@@ -37,16 +42,17 @@
 local args = { ... }
 local autoRun = false
 local cycles = 40
-local tracePath, replayPath
+local tracePath, replayPath, liveMode
 do
   local i = 1
   while i <= #args do
     local a = args[i]
     if a == "run" then autoRun = true
-    -- trace/replay take a PARENT DIRECTORY, not a full file path -- bee_trace
+    -- trace/replay/live take a PARENT DIRECTORY, not a full file path -- bee_trace
     -- resolves bee_trace.dat inside it (same folder the real runner writes to).
     elseif a == "trace" then i = i + 1; tracePath = require("bee_trace").pathInDir(args[i])       -- EXPORT a trace
-    elseif a == "replay" then i = i + 1; replayPath = require("bee_trace").pathInDir(args[i]); autoRun = true -- IMPORT+VALIDATE
+    elseif a == "replay" then i = i + 1; replayPath = require("bee_trace").pathInDir(args[i]); autoRun = true -- BATCH import+validate
+    elseif a == "live" then i = i + 1; replayPath = require("bee_trace").pathInDir(args[i]); autoRun = true; liveMode = true -- LIVE tail+validate
     elseif tonumber(a) then cycles = tonumber(a) end
     i = i + 1
   end
@@ -401,19 +407,130 @@ if tracePath then
   end
 end
 
--- REPLAY: import inheritance from a trace + validate. Build a per-apiary FIFO
--- queue of the offspring Minecraft produced; the sim pops from it (in mating
--- order) instead of rolling its own RNG. Everything else is diffed per step.
-local traceSnaps, replayIdx, birthQueues, divergences = nil, 0, {}, 0
+-- REPLAY (batch `replay DIR` + live `live DIR`): import inheritance from the MC
+-- trace + validate. Build a per-apiary FIFO queue of the offspring Minecraft
+-- produced; the sim pops from it (in mating order) instead of rolling its own
+-- RNG. Everything else is diffed per step.
+--
+-- ALIGNMENT: both sides now record one snapshot per Status.setStep (symmetric),
+-- but MC has extra leading steps the sim never emits ("Starting up", setup) and
+-- may emit MC-only poll steps mid-cycle. So we DON'T align by raw index; nextMc()
+-- forward-scans the MC stream for the snapshot matching the sim's (cycle, step),
+-- skipping MC-only steps within the same cycle and flagging a divergence if MC
+-- has already moved to a later cycle (the sim's step never appeared).
+--
+-- LIVE: instead of reading the whole file up front, tail it as MC appends -- the
+-- fast sim blocks (tailUntil) until MC catches up and writes the step/birth it
+-- needs, so it tracks a running Minecraft robot in lockstep.
+local mcSnaps, birthQueues, divergences, mcPtr, stepsChecked = nil, {}, 0, 0, 0
+local nextMc = function() return nil end
 if replayPath then
-  traceSnaps = assert(T.read(io.open, replayPath))
-  for _, s in ipairs(traceSnaps) do
+  local POLL, HEARTBEAT_EVERY, LIVE_TIMEOUT = 1.0, 15, 300
+  local IS_WIN = package.config:sub(1, 1) == "\\"
+  local function sleep(secs)
+    -- Pure-Lua host sleep (no os.sleep off-OpenOS). `ping -n 2` ~= 1s on Windows;
+    -- `sleep` on POSIX. Only used in live mode's poll loop (~1s granularity is fine
+    -- for a Minecraft robot that steps every few seconds).
+    if IS_WIN then
+      os.execute(string.format("ping -n %d 127.0.0.1 >NUL 2>&1", math.max(2, math.floor(secs) + 1)))
+    else
+      os.execute(string.format("sleep %s", secs))
+    end
+  end
+
+  -- Route a parsed MC snapshot into the ordered stream + per-apiary birth queues.
+  local function ingest(s)
+    mcSnaps[#mcSnaps + 1] = s
     for _, m in ipairs(s.births or {}) do
       birthQueues[m.key] = birthQueues[m.key] or {}
       table.insert(birthQueues[m.key], m.recs)
     end
   end
+
+  -- Read any bytes appended since last time, parsing only COMPLETE lines (the
+  -- writer flushes one whole `serialize()\n` record at a time, but a poll can
+  -- still catch a half-written trailing line -- buffer it until its newline
+  -- arrives). Returns true if at least one new snapshot was ingested.
+  local tailOffset, tailBuf = 0, ""
+  local function tailPump()
+    local fh = io.open(replayPath, "r")
+    if not fh then return false end
+    fh:seek("set", tailOffset)
+    local chunk = fh:read("*a") or ""
+    fh:close()
+    if chunk == "" then return false end
+    tailOffset = tailOffset + #chunk
+    tailBuf = tailBuf .. chunk
+    local grew = false
+    while true do
+      local nl = tailBuf:find("\n", 1, true)
+      if not nl then break end
+      local line = tailBuf:sub(1, nl - 1)
+      tailBuf = tailBuf:sub(nl + 1)
+      if line ~= "" then
+        local s = T.parse(line)
+        if s then ingest(s); grew = true end
+      end
+    end
+    return grew
+  end
+
+  -- Block (live only) until `pred()` holds, pumping the trace as MC appends.
+  -- Returns false on timeout (MC stalled or the run really ended).
+  local function tailUntil(pred)
+    local waited, sinceBeat = 0, 0
+    while true do
+      tailPump()
+      if pred() then return true end
+      if waited >= LIVE_TIMEOUT then return false end
+      sleep(POLL); waited = waited + POLL; sinceBeat = sinceBeat + POLL
+      if sinceBeat >= HEARTBEAT_EVERY then
+        sinceBeat = 0
+        print(string.format("  ...waiting for Minecraft trace to advance (%.0fs)", waited))
+      end
+    end
+  end
+
+  mcSnaps = {}
+  if liveMode then
+    print("LIVE replay: tailing " .. replayPath .. " as Minecraft writes it.")
+    tailPump() -- absorb whatever's already there (a run in progress / prior steps)
+  else
+    assert(select(1, io.open(replayPath, "r")), "trace not found: " .. replayPath):close()
+    local snaps = assert(T.read(io.open, replayPath))
+    for _, s in ipairs(snaps) do ingest(s) end
+  end
+
+  -- Find the MC snapshot matching this sim step. Forward-scan from mcPtr, skipping
+  -- cycle-0 setup and same-cycle MC-only steps; stop (divergence -> nil) once MC
+  -- has advanced past the sim's cycle. Leaves mcPtr so the next sim step retries.
+  nextMc = function(snap)
+    local i = mcPtr
+    while true do
+      i = i + 1
+      while i > #mcSnaps do
+        if not liveMode then return nil end -- batch: MC file exhausted
+        if not tailUntil(function() return i <= #mcSnaps end) then return nil end
+      end
+      local m = mcSnaps[i]
+      if (m.cycle or 0) >= 1 then
+        if m.cycle == snap.cycle and m.step == snap.step then
+          mcPtr = i; return m
+        elseif (m.cycle or 0) > snap.cycle then
+          mcPtr = i - 1; return nil -- sim's step never appeared in its cycle
+        end
+        -- same cycle, different step: an MC-only poll step -> skip it
+      end
+      -- cycle-0 (startup/setup) -> skip
+    end
+  end
+
   world.importBirths = function(key)
+    if liveMode then
+      -- The sim mates before MC (it runs faster); block until MC has harvested
+      -- the offspring for this apiary and written it to the trace.
+      tailUntil(function() return birthQueues[key] and #birthQueues[key] > 0 end)
+    end
     local q = birthQueues[key]
     if not q or #q == 0 then return nil end -- ran dry -> sim mated more than MC (a divergence)
     local recs = table.remove(q, 1)
@@ -428,7 +545,12 @@ end
 -- LOGIC disagrees with the recorded Minecraft run at this step.
 local function diffSnapshots(sim, mc)
   local diffs = {}
-  if not mc then diffs[#diffs + 1] = "no matching Minecraft step (sim ran longer)"; return diffs end
+  if not mc then
+    diffs[#diffs + 1] = string.format(
+      "no matching Minecraft step for sim (cycle %s, %s) -- MC never took this step / ran shorter",
+      tostring(sim.cycle), tostring(sim.step))
+    return diffs
+  end
   if sim.pos.x ~= mc.pos.x or sim.pos.z ~= mc.pos.z then
     diffs[#diffs + 1] = string.format("pos sim(%d,%d) vs mc(%d,%d)", sim.pos.x, sim.pos.z, mc.pos.x, mc.pos.z)
   end
@@ -455,30 +577,42 @@ end
 
 local lastSig = nil
 Status.onChange = function()
-  local sig = containersSignature()
-  if sig == lastSig then return end -- no container change -> view persists, no prompt
-  lastSig = sig
+  -- SYMMETRIC RECORDING: capture + export + diff on EVERY setStep (one snapshot
+  -- per task boundary, exactly like the real runner) so the two traces line up
+  -- 1:1 through nextMc's matcher. The container-signature gate now controls ONLY
+  -- the detailed VIEW + step prompt (so pure movement doesn't redraw/prompt) --
+  -- it no longer suppresses the snapshot itself.
   local matings = pendingMatings; pendingMatings = {}
-  printContainers()
   local snap = captureSnapshot(matings)
   if writer then writer.step(snap) end
-  if traceSnaps then
-    replayIdx = replayIdx + 1
-    local diffs = diffSnapshots(snap, traceSnaps[replayIdx])
-    if #diffs > 0 then
-      divergences = divergences + #diffs
-      print(string.format("  !! DIVERGENCE at step %d (%s):", replayIdx, snap.step))
-      for _, d in ipairs(diffs) do print("     - " .. d) end
-    end
+
+  local sig = containersSignature()
+  local changed = (sig ~= lastSig); lastSig = sig
+
+  local diffs
+  if mcSnaps then
+    stepsChecked = stepsChecked + 1
+    diffs = diffSnapshots(snap, nextMc(snap))
   end
-  prompt()
+  local diverged = diffs and #diffs > 0
+
+  -- Always surface a divergence (and redraw so the diverging state is visible),
+  -- even on a pure-movement step the view would normally skip.
+  if changed or diverged then printContainers() end
+  if diverged then
+    divergences = divergences + #diffs
+    print(string.format("  !! DIVERGENCE at step %d (%s):", stepsChecked, snap.step))
+    for _, d in ipairs(diffs) do print("     - " .. d) end
+  end
+  if changed or diverged then prompt() end
 end
 
 print("Scenario sim: 4 ApChests, 2 apiaries, drawer+trash+charger; seeding Forest/Meadows base stock.")
 print(string.format("Goal: mutation -> Common at both apiaries. %s, up to %d cycles.%s%s\n",
   autoRun and "auto-run" or "STEP MODE", cycles,
   tracePath and ("\nEXPORTING trace -> " .. tracePath) or "",
-  replayPath and ("\nREPLAYING+VALIDATING trace <- " .. replayPath) or ""))
+  replayPath and (string.format("\n%s trace <- %s",
+    liveMode and "LIVE-VALIDATING (tailing)" or "REPLAYING+VALIDATING", replayPath)) or ""))
 printContainers()
 prompt()
 
@@ -490,8 +624,8 @@ for cycle = 1, cycles do
 end
 
 if writer then writer.close(); print("\nTrace written to " .. tracePath) end
-if traceSnaps then
+if mcSnaps then
   print(string.format("\nVALIDATION: %d step(s) checked, %d divergence(s)%s.",
-    replayIdx, divergences, divergences == 0 and " -- sim matches Minecraft" or " -- see !! lines above"))
+    stepsChecked, divergences, divergences == 0 and " -- sim matches Minecraft" or " -- see !! lines above"))
 end
 print("\nDone.")
