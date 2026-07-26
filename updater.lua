@@ -79,61 +79,37 @@ function Updater:isUpdateNeeded()
   return isProgramUpdateNeeded, remoteVersion
 end
 
--- Download and update files. NEVER touches bee_keeper_manager_config.lua or
--- bee_keeper_sites.dat -- those are user data (config + your area scan).
+-- Download and update files. NEVER touches the `preserved` files (config +
+-- your area scan) -- those are user data. The file list comes from
+-- bee_files.lua, the single source of truth shared with installer.lua, so the
+-- two can't drift apart and leave a module unshipped.
 function Updater:downloadFiles()
   local repo = "https://raw.githubusercontent.com/" .. self.repository .. "/" .. self.branch .. "/"
 
-  local files = {
-    "bee_breeding.lua",
-    "bee_trait_config.lua",
-    "bee_keeper_nav.lua",
-    "bee_keeper_setup.lua",
-    "bee_keeper_status.lua",
-    "bee_keeper_ui.lua",
-    "bee_keeper_manager.lua",
-    "bee_keeper_manager_run.lua",
-    "bee_mutation_graph.lua",
-    "bee_genebank.lua",
-    "bee_genebank_scheduler.lua",
-    "bee_rainbow.lua",
-    "bee_traitmax_mutation.lua",
-    "bee_traitmax.lua",
-    "bee_program.lua",
-    "bee_combine.lua",
-    "bee_pool.lua",
-    "bee_allele_values.lua",
-    "bee_templates.lua",
-    "updater.lua",
-    "version.lua",
-    -- Real GTNH mutation graph + species list, dumped once from a stationary
-    -- Adapter next to an apiary (see docs/oc_forestry_api.md). Shipped to the
-    -- robot as static data since the robot has no bee_housing component of its
-    -- own -- it never queries the graph live.
-    "bee_mutations.dat",
-    "bee_species.dat",
-    -- Per-species DEFAULT allele templates, parsed from the mod source repos
-    -- (see docs/data_sources.md). The fuel for traitmax-via-mutation: which
-    -- species carries a good allele for each trait.
-    "bee_templates.dat",
-  }
-
-  print("Downloading files...")
-  for _, file in ipairs(files) do
+  local function download(file)
     local url = repo .. file
     local path = shell.getWorkingDirectory() .. "/" .. file
-
     if filesystem.exists(path) then
       filesystem.remove(path)
     end
-
-    local success = shell.execute("wget -fq " .. url .. " " .. path)
-    if success then
-      print("  [ok] " .. file)
-    else
-      print("  [FAILED] " .. file)
-    end
+    return shell.execute("wget -fq " .. url .. " " .. path)
   end
+
+  -- Refresh the manifest itself FIRST so a newly-added module in this release
+  -- is downloaded in the same pass (bee_files.lua is also in `code`, but we
+  -- need it fetched before we can read the up-to-date list).
+  print("Refreshing file manifest...")
+  download("bee_files.lua")
+  local manifest = dofile(shell.getWorkingDirectory() .. "/bee_files.lua")
+
+  print("Downloading files...")
+  for _, file in ipairs(manifest.code) do
+    print((download(file) and "  [ok] " or "  [FAILED] ") .. file)
+  end
+  for _, file in ipairs(manifest.data) do
+    print((download(file) and "  [ok] " or "  [FAILED] ") .. file)
+  end
+  -- manifest.preserved is intentionally NOT touched -- user data.
 end
 
 -- Main update function
