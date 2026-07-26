@@ -17,8 +17,13 @@ return {
   -- flies to honeyStoragePos (or storagePos, below) and fetches more.
   honeySlot = 1,
 
-  -- Optional: a separate location to fetch honey from if you keep it
-  -- apart from general storage. Leave nil to just reuse storagePos.
+  -- Honeydew is kept SEPARATE from bee storage, in its own drawer. This is the
+  -- {x,z} above that drawer (accessed side=down). M.restockHoney flies here and
+  -- pulls honeydew into honeySlot when cargo runs dry; the drawer is NEVER used
+  -- for bees (that's storagePositions) and bees are never dropped into it.
+  -- Probed drawer: getInventoryName = "tile.fullDrawers1", item "Forestry:honeydew"
+  -- (label "Honeydew"). restockHoney scans every slot and matches by name, so the
+  -- drawer's slot layout doesn't matter. Leave nil to just reuse general storage.
   honeyStoragePos = nil,
 
   -- Slots used as the live candidate-bee pool (the agent's own cargo).
@@ -54,8 +59,11 @@ return {
   -- function(bee) to route them elsewhere instead (sampler/furnace).
   onDiscard = nil,
 
-  -- How many slots to try in the storage container before giving up on a
-  -- discard. Confirmed 27 via getInventorySize() -- a single chest.
+  -- Fallback slot count for a storage inventory when getInventorySize() can't
+  -- report it (it almost always can, and is preferred -- this is just a floor).
+  -- Storage is TYPE-AGNOSTIC: any inventory block works -- plain chests, barrels,
+  -- Storage Drawers, Forestry Apiarist's Chests (125 slots) -- the code addresses
+  -- them by position and asks each for its real size.
   storageSlotCount = 27,
 
   -- Trash cans (e.g. Extra Utilities' Trash Can) typically expose a
@@ -122,11 +130,6 @@ return {
     pristineOnly = true,
   },
 
-  -- Storage backend for genebanks: "shared" (a normal chest at storagePos, the
-  -- default) or "ae2" (an ME network via an me_interface component). See
-  -- bee_storage.lua.
-  storageBackend = "shared",
-
   -- DEPRECATED / unused: mutation recipes now come from the committed
   -- bee_mutations.dat dump, loaded into config.mutationGraph at startup by
   -- bee_keeper_manager_run.lua (see M.loadMutationGraph). Left here only so
@@ -147,13 +150,15 @@ return {
   storagePos = nil,
   trashPos = nil,
 
-  -- MULTIPLE apiarist chests (the storage backend). The robot flies between
-  -- these in order, filling one chest before spilling into the next. Each is an
-  -- {x,z} above a Forestry Apiarist's Chest (125 slots; drones stack to 64),
-  -- accessed on side=down like storagePos. When EVERY chest is full and a bee
-  -- still has nowhere to go, the robot STOPS and BEEPS (M.onStorageFull) instead
-  -- of dropping bees -- add/empty a chest and poke it to resume. Leave nil to
-  -- fall back to the single storagePos above.
+  -- The bee STORAGE network: one or more inventory blocks the robot flies
+  -- between, filling one before spilling into the next. Spans ANY storage block
+  -- -- plain chests, barrels, Storage Drawers, Forestry Apiarist's Chests (125
+  -- slots) -- freely mixed; each is an {x,z} accessed side=down, and its real
+  -- slot count is queried per block. When EVERY store is full and a bee still
+  -- has nowhere to go, the robot STOPS and BEEPS (M.onStorageFull) instead of
+  -- dropping bees -- add/empty a store and poke it to resume. Honeydew is NOT
+  -- kept here (see honeyStoragePos). Leave nil to fall back to the single
+  -- storagePos above.
   --   storagePositions = { { x = -6, z = -6 }, { x = -6, z = -8 }, { x = -6, z = -10 } },
   storagePositions = nil,
 

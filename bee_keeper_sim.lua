@@ -836,11 +836,12 @@ function M.install(config, sites, opts)
   local function apiaryAt(x, z) return world.apiaries[x .. ":" .. z] end
   local function atPos(px, pz) return px ~= nil and world.drone.x == px and world.drone.z == pz end
 
-  -- MULTI-CHEST storage: the robot flies between several apiarist chests (per the
-  -- user's design -- one bounded chest per position). config.storagePositions is
-  -- the authoritative list; the legacy single config.storagePos is chest #1.
-  -- Chest #1 aliases world.storage so all the existing seeding (putStorage, honey
-  -- backup) still lands somewhere real; extra chests get fresh bounded tables.
+  -- MULTI-STORE storage: the robot flies between several storage blocks (per the
+  -- user's design -- one bounded inventory per position; any block type).
+  -- config.storagePositions is the authoritative list; the legacy single
+  -- config.storagePos is store #1. Store #1 aliases world.storage so all the
+  -- existing seeding (putStorage, honey backup) still lands somewhere real; extra
+  -- stores get fresh bounded tables.
   world.storages = {}
   do
     local positions = config.storagePositions
@@ -853,6 +854,21 @@ function M.install(config, sites, opts)
       end
     elseif config.storagePos then
       world.storages[1] = { x = config.storagePos.x, z = config.storagePos.z, primary = true, slots = {} }
+    end
+    -- The honeydew DRAWER: kept separate from bee storage (config.honeyStoragePos).
+    -- Modelled as its own bounded inventory seeded with honeydew, so M.restockHoney
+    -- flying there can pull honey WITHOUT ever touching a bee store. Skipped if it
+    -- coincides with a storage position (a shared chest still holds honey backup).
+    local hp = config.honeyStoragePos
+    if hp then
+      local coincides = false
+      for _, s in ipairs(world.storages) do if s.x == hp.x and s.z == hp.z then coincides = true end end
+      if not coincides then
+        local drawer = { x = hp.x, z = hp.z, size = opts.honeyDrawerSize or 2, slots = {} }
+        drawer.slots[drawer.size] = { name = "Forestry:honeydew", label = "Honeydew",
+          size = opts.honeyDrawerStock or 64, maxSize = 64 }
+        world.storages[#world.storages + 1] = drawer
+      end
     end
   end
   -- Resolve a chest's live view. Chest #1 (primary) aliases world.storage /

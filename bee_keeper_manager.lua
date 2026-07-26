@@ -1566,10 +1566,11 @@ local function dumpEntriesAt(pos, slotCount, discardEntries, keepId)
   return dropped
 end
 
--- The list of apiarist-chest storage positions, in fill order. Prefers the
--- multi-chest config.storagePositions (the robot flies between several apiarist
--- chests); falls back to the single legacy config.storagePos so nothing that
--- only set the old field breaks.
+-- The list of bee-storage positions, in fill order. Storage is TYPE-AGNOSTIC:
+-- each position is any inventory block (plain chest, barrel, Storage Drawer,
+-- Apiarist's Chest) addressed by {x,z}/side=down, its real size queried per
+-- block. Prefers the multi-store config.storagePositions; falls back to the
+-- single legacy config.storagePos so nothing that only set the old field breaks.
 function M.storagePositions(config)
   if config.storagePositions and #config.storagePositions > 0 then
     return config.storagePositions
@@ -1578,19 +1579,19 @@ function M.storagePositions(config)
   return {}
 end
 
--- STORAGE FULL handler: every apiarist chest is full and `pending` bees have
+-- STORAGE FULL handler: every storage block is full and `pending` bees have
 -- nowhere to go. Per the user's design the robot STOPS and BEEPS rather than
 -- silently dropping bees on the floor. config.onStorageFull(config, pending)
 -- overrides (tests inject one that records the event instead of blocking). The
--- real-hardware default beeps and blocks until the user frees a chest and pokes
+-- real-hardware default beeps and blocks until the user frees a store and pokes
 -- the robot (any signal) -- same beep+pullSignal pattern as the special-condition
 -- gate. Returns nothing; the caller has already placed everything it could.
 function M.onStorageFull(config, pending)
   if config.onStorageFull then return config.onStorageFull(config, pending) end
-  Status.setStep("STORAGE FULL -- halted (free a chest, then poke the robot)")
-  print(string.format("[storage full] All %d apiarist chest(s) are full; %d bee(s) have nowhere to go.",
+  Status.setStep("STORAGE FULL -- halted (free a store, then poke the robot)")
+  print(string.format("[storage full] All %d storage block(s) are full; %d bee(s) have nowhere to go.",
     #M.storagePositions(config), pending and #pending or 0))
-  print("   Empty or add a chest, then press any key / poke the robot to continue...")
+  print("   Empty or add a store, then press any key / poke the robot to continue...")
   local computer = require("computer")
   while true do
     M.beepAlert()
@@ -1600,9 +1601,9 @@ function M.onStorageFull(config, pending)
   end
 end
 
--- Fly discarded bees to storage, spreading across every apiarist chest in fill
--- order: fill chest 1, spill the rest into chest 2, and so on. If bees still
--- remain after the LAST chest, storage is genuinely full -> M.onStorageFull
+-- Fly discarded bees to storage, spreading across every storage block in fill
+-- order: fill store 1, spill the rest into store 2, and so on. If bees still
+-- remain after the LAST store, storage is genuinely full -> M.onStorageFull
 -- (stop + beep). Returns the number actually deposited.
 function M.dumpToStorage(config, discardEntries, keepId)
   local positions = M.storagePositions(config)

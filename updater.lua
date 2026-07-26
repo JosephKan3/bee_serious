@@ -104,7 +104,6 @@ function Updater:downloadFiles()
     "bee_pool.lua",
     "bee_allele_values.lua",
     "bee_templates.lua",
-    "bee_storage.lua",
     "updater.lua",
     "version.lua",
     -- Real GTNH mutation graph + species list, dumped once from a stationary
