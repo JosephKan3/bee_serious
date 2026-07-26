@@ -1318,9 +1318,12 @@ do
 end
 
 -- ============================================================
--- Test: runQualitySite prefers trash over storage for discards when both
--- are known -- a breeding program generates a steady stream of unwanted
--- drones that would otherwise slowly fill up a finite storage chest.
+-- Test: runQualitySite PRESERVES an off-target discard to storage (does NOT
+-- void it to trash) when its species isn't banked yet -- bank-gated policy.
+-- A Forest/Meadows drone that doesn't help the current trait target is the
+-- only genetic seed for that species' future bank, so its genes must be kept.
+-- (Previously this test asserted the opposite -- trash-preferred -- which
+-- voided un-banked base species; reported from real-hardware testing.)
 -- ============================================================
 
 do
@@ -1354,11 +1357,11 @@ do
 
   M.runQualitySite(config, site)
 
-  world.dronePos = { x = -10, z = -10 }
-  check("discard landed at trashPos, not storagePos", apiary(DOWN)[1] ~= nil, "trash slot 1 empty")
-
   world.dronePos = { x = 0, z = 0 }
-  check("storagePos was never touched when trashPos is also known", apiary(DOWN)[1] == nil)
+  check("un-banked off-target discard is PRESERVED to storage", apiary(DOWN)[1] ~= nil, "storage empty")
+
+  world.dronePos = { x = -10, z = -10 }
+  check("trash was NOT used to void an un-banked species", apiary(DOWN)[1] == nil)
 end
 
 -- ============================================================
@@ -1803,6 +1806,59 @@ do
   check("site1 is fully handled (harvest+decide) before site2 is ever visited",
     firstSite2Idx ~= nil and lastSite1Idx ~= nil and lastSite1Idx < firstSite2Idx,
     "gotoLog=" .. table.concat(world.gotoLog, ","))
+end
+
+-- ============================================================
+-- Test: bank-gated discard policy (M.partitionDiscards / M.isSpeciesBanked)
+-- Base-species genetics must NOT be voided until the species is banked.
+-- ============================================================
+
+do
+  -- partitionDiscards is pure: allelesOf/isBanked are injected.
+  local e = function(id) return { drone = { id = id, _slot = id } } end
+  local alleles = {
+    forest  = { Forest = true },
+    meadows = { Meadows = true },
+    myst    = { Mystical = true },
+    hybrid  = { Forest = true, Mystical = true }, -- carries two species' alleles
+    unknown = nil,                                 -- unanalyzed: species unknown
+  }
+  local allelesOf = function(entry) return alleles[entry.drone.id] end
+  -- Only Mystical is banked to reserve.
+  local isBanked = function(sp) return sp == "Mystical" end
+
+  local entries = { e("forest"), e("meadows"), e("myst"), e("hybrid"), e("unknown") }
+  local trashable, preserve = M.partitionDiscards(entries, allelesOf, isBanked)
+
+  local function ids(list)
+    local t = {} for _, x in ipairs(list) do t[x.drone.id] = true end return t
+  end
+  local T, P = ids(trashable), ids(preserve)
+
+  check("banked species (Mystical) is trash-eligible", T.myst == true)
+  check("un-banked Forest is preserved, not trashed", P.forest == true and not T.forest)
+  check("un-banked Meadows is preserved, not trashed", P.meadows == true and not T.meadows)
+  check("hybrid carrying ANY un-banked allele is preserved", P.hybrid == true and not T.hybrid,
+    "Forest allele isn't banked, so the whole drone must be kept")
+  check("unanalyzed (species unknown) is always preserved", P.unknown == true and not T.unknown)
+end
+
+do
+  -- isSpeciesBanked reads the census cache; threshold is genebank.minDrones.
+  local config = {
+    genebank = { minDrones = 8 },
+    _bankCensus = {
+      Mystical = { purePrincesses = 2, pureDrones = 8 }, -- meets reserve
+      Forest   = { purePrincesses = 1, pureDrones = 3 }, -- below reserve
+    },
+  }
+  check("species meeting minDrones is banked", M.isSpeciesBanked(config, "Mystical") == true)
+  check("species below minDrones is NOT banked", M.isSpeciesBanked(config, "Forest") == false)
+  check("species absent from census is NOT banked", M.isSpeciesBanked(config, "Meadows") == false)
+
+  local noCensus = { genebank = { minDrones = 8 } }
+  check("no census cache -> nothing banked (safe default: preserve)",
+    M.isSpeciesBanked(noCensus, "Mystical") == false)
 end
 
 print("")

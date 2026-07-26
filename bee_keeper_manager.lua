@@ -687,10 +687,11 @@ function M.runQualitySite(config, site)
   -- cargo, throws away genetic material for no reason: keeping it costs
   -- nothing when there's room, and minCopies math can shift as other
   -- drones get consumed elsewhere, potentially making it useful again
-  -- later. Default behavior when actually discarding: fly to
-  -- config.trashPos (permanently voided -- see M.dumpToTrash) if known,
-  -- else config.storagePos (see M.dumpToStorage) -- trash is preferred
-  -- when both are known. Override config.onDiscard to route elsewhere
+  -- later. Default behavior when actually discarding: M.dumpDiscards, which
+  -- is BANK-GATED -- it preserves (routes to the storage network, keeping the
+  -- genes) any bee whose species isn't banked to reserve yet, and only voids
+  -- (config.trashPos, see M.dumpToTrash) the redundant byproducts of species
+  -- that already have a full bank. Override config.onDiscard to route elsewhere
   -- entirely (sampler/furnace/junk). No trip back to the site afterward
   -- needed -- the apiary is already fully loaded, and wherever this
   -- discard trip ends is a perfectly fine place to start the next
@@ -705,12 +706,12 @@ function M.runQualitySite(config, site)
         for _, entry in ipairs(plan.toDiscard) do
           if entry.drone.id ~= plan.breedWith.id then config.onDiscard(entry.drone) end
         end
-      elseif config.trashPos or config.storagePos then
-        if config.trashPos then
-          M.dumpToTrash(config, plan.toDiscard, plan.breedWith.id)
-        else
-          M.dumpToStorage(config, plan.toDiscard, plan.breedWith.id)
-        end
+      else
+        -- Bank-gated: an off-target loser (e.g. a Forest/Meadows drone while
+        -- trait-maxing Mystical) is preserved in storage unless its species is
+        -- already banked -- its genes are the only seed for that species' future
+        -- bank. Only genuinely-redundant banked species get voided to trash.
+        M.dumpDiscards(config, plan.toDiscard, plan.breedWith.id)
       end
     end
   end
@@ -994,9 +995,11 @@ function M.junkHybrids(config, site)
     end
   end
   if #entries == 0 then return 0 end
-  if config.trashPos then return M.dumpToTrash(config, entries, nil) end
-  if config.storagePos then return M.dumpToStorage(config, entries, nil) end
-  return 0
+  -- Bank-gated: a hybrid drone of a species without a full bank yet is that
+  -- species' only genetic seed -- preserve it in storage rather than void it.
+  -- Only species already banked to reserve have their redundant byproducts
+  -- trashed here. (Was: trash-preferred, which voided un-banked base species.)
+  return M.dumpDiscards(config, entries, nil)
 end
 
 -- ============================================================
@@ -1075,6 +1078,12 @@ function M.syncBanksToStorage(config)
       end
     end
   end)
+  -- Cache the census so the bank-gated discard router (M.isSpeciesBanked) can
+  -- tell, even later in the SAME cycle or in a plain quality/combine phase that
+  -- doesn't re-scan, whether a species is already banked to reserve. Stale-by-a-
+  -- cycle is fine: bank state changes slowly, and a missing/empty cache defaults
+  -- to "not banked" -> preserve, never void.
+  config._bankCensus = summary
   return summary, convertible, slotsByKey
 end
 
@@ -1674,6 +1683,74 @@ end
 function M.dumpToTrash(config, discardEntries, keepId)
   Status.setStep("Flying discards to trash")
   return dumpEntriesAt(config.trashPos, config.trashSlotCount or 1, discardEntries, keepId)
+end
+
+-- Is `species` already banked to its maintenance reserve? Reads the census
+-- cached by M.syncBanksToStorage. A missing cache, a species not in it, or no
+-- genebank config all mean "not banked" -> its bees are preserved, never voided.
+-- This is the gate behind the bank-gated discard policy: base-species genetics
+-- are the scarce resource, so nothing gets trashed until its species has a real
+-- bank (>= minDrones purebred drones) that makes further copies genuinely
+-- redundant.
+function M.isSpeciesBanked(config, species)
+  local census = config._bankCensus
+  if not census then return false end
+  local rec = census[species]
+  if not rec then return false end
+  local minD = (config.genebank and config.genebank.minDrones) or 8
+  return rec.pureDrones >= minD
+end
+
+-- PURE, unit-tested. Splits discard entries into (trashable, preserve). A drone
+-- is trash-eligible only when EVERY species allele it carries is already banked
+-- -- until then it may be the only seed for that species' bank, so it's
+-- preserved. Entries whose species can't be determined (unanalyzed) are always
+-- preserved. allelesOf(entry) -> { [species]=true, ... } or nil; isBanked(sp) -> bool.
+function M.partitionDiscards(entries, allelesOf, isBanked)
+  local trashable, preserve = {}, {}
+  for _, e in ipairs(entries) do
+    local alleles = allelesOf(e)
+    local eligible = alleles ~= nil
+    if eligible then
+      for sp in pairs(alleles) do
+        if not isBanked(sp) then eligible = false; break end
+      end
+    end
+    if eligible then trashable[#trashable + 1] = e else preserve[#preserve + 1] = e end
+  end
+  return trashable, preserve
+end
+
+-- Bank-gated discard router -- the single place off-target drones get shed.
+-- Replaces the old "trash if trashPos else storage" blocks: it PRESERVES (routes
+-- to the storage network, keeping the genes) every bee whose species isn't yet
+-- banked, and only VOIDS (trash) the genuinely-redundant byproducts of species
+-- that already have a full bank. Falls back gracefully when only one destination
+-- exists. Returns the number of bees actually deposited.
+function M.dumpDiscards(config, discardEntries, keepId)
+  local function allelesOf(e)
+    if not (e.drone and e.drone._slot) then return nil end
+    local c = classifyBee(invCtrl().getStackInInternalSlot(e.drone._slot))
+    return c and c.alleles or nil
+  end
+  local function isBanked(sp) return M.isSpeciesBanked(config, sp) end
+  local trashable, preserve = M.partitionDiscards(discardEntries, allelesOf, isBanked)
+
+  local haveStorage = #M.storagePositions(config) > 0
+  local dropped = 0
+  -- Preserve group: storage first (genes kept); trash only as a last resort when
+  -- there's no storage at all, to avoid choking cargo.
+  if #preserve > 0 then
+    if haveStorage then dropped = dropped + M.dumpToStorage(config, preserve, keepId)
+    elseif config.trashPos then dropped = dropped + M.dumpToTrash(config, preserve, keepId) end
+  end
+  -- Trashable group (already-banked, redundant): void it; fall back to storage
+  -- if no trash can is configured.
+  if #trashable > 0 then
+    if config.trashPos then dropped = dropped + M.dumpToTrash(config, trashable, keepId)
+    elseif haveStorage then dropped = dropped + M.dumpToStorage(config, trashable, keepId) end
+  end
+  return dropped
 end
 
 -- ============================================================
