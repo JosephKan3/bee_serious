@@ -189,12 +189,21 @@ end
 -- (bee_templates.build()); nil -> only the species locus changes. Returns child.
 local function applyMutation(child, resultName, templates, traitList)
   local sp = { name = resultName, uid = "sim." .. resultName:lower(), humidity = "Normal", temperature = "Normal" }
-  child.species = { active = sp, inactive = sp }
+  -- Real Forestry (confirmed in-game): a mutation makes the offspring a HYBRID,
+  -- not a purebred Result. ONE haploid set becomes the result species' template
+  -- (the active side -- how its good alleles ENTER the pool), the OTHER keeps the
+  -- Mendelian allele inherited from a parent. So the offspring is Result/parent
+  -- (e.g. Common/Forest); a PURE Result is only reached later by breeding two
+  -- Result-carriers together. Modelling it as instantly-pure (the old code) hid a
+  -- real scheduler dead-end: it could never bootstrap the first pure of a mutated
+  -- species. See bee_genebank_scheduler's consolidate job.
+  child.species = { active = sp, inactive = child.species and child.species.inactive }
   if templates then
     local dg = AlleleValues.defaultGenome(templates[resultName])
     for _, trait in ipairs(traitList or {}) do
       if trait ~= "species" and dg[trait] ~= nil then
-        child[trait] = { active = dg[trait], inactive = dg[trait] }
+        local prev = child[trait]
+        child[trait] = { active = dg[trait], inactive = prev and prev.inactive }
       end
     end
   end

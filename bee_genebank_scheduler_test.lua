@@ -129,6 +129,53 @@ do
   check("target with 1 pure princess (no drones) counts as done", j.type == "done", j.type)
 end
 
+-- ============================================================
+-- Consolidation: a mutation only ever yields HYBRID carriers, never a pure. The
+-- ONLY way to bootstrap the first pure of a mutated species is to breed a carrier
+-- princess x carrier drone together (`fix`). Without this the scheduler mutates
+-- forever and never gets a pure -- the real-hardware dead-end.
+-- ============================================================
+
+local function stateD(banks, convertible, convertibleDrones)
+  return {
+    banks = banks, convertible = convertible or {}, convertibleDrones = convertibleDrones or {},
+    steps = STEPS, baseSpecies = BASE, target = "Noble",
+    minPrincesses = 1, minDrones = 8,
+  }
+end
+
+do
+  -- Base ready, no pure Common anywhere, but a carrier Common princess AND a
+  -- carrier Common drone exist -> consolidate them into a pure.
+  local j = S.nextJob(stateD(withBase({}), { Common = 1 }, { Common = 1 }))
+  check("fix when carriers of BOTH roles exist but no pure yet", j.type == "fix" and j.species == "Common",
+    j.type .. "/" .. tostring(j.species))
+end
+
+do
+  -- Only a carrier PRINCESS (no carrier drone) -> can't fix yet; mutate more to
+  -- produce carrier drones.
+  local j = S.nextJob(stateD(withBase({}), { Common = 1 }, {}))
+  check("no fix with only a carrier princess -> mutate to make more carriers",
+    j.type == "mutate" and j.result == "Common", j.type)
+end
+
+do
+  -- A pure Common princess already exists but no Common drones, and carriers of
+  -- both roles are around -> fix seeds the first pure DRONES (grow needs a pure
+  -- drone to start, which we don't have).
+  local j = S.nextJob(stateD(withBase({ Common = b(1, 0) }), { Common = 1 }, { Common = 1 }))
+  check("fix to seed first pure drones when princess exists but no pure drone",
+    j.type == "fix" and j.species == "Common", j.type .. "/" .. tostring(j.species))
+end
+
+do
+  -- Once Common has a pure princess AND at least one pure drone, stop fixing and
+  -- grow the drone bank normally.
+  local j = S.nextJob(stateD(withBase({ Common = b(1, 1) }), { Common = 1 }, { Common = 1 }))
+  check("grow (not fix) once a pure drone seed exists", j.type == "grow" and j.species == "Common", j.type)
+end
+
 print("")
 if failures == 0 then
   print("ALL TESTS PASSED")

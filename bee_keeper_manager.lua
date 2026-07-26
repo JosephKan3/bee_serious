@@ -1032,13 +1032,108 @@ end
 --   convertible = { [species] = <# pristine hybrid princesses carrying that allele> }
 --   slotsByKey  = fetch index: "P:<sp>" pure princess, "D:<sp>" pure drone,
 --                 "V:<sp>" hybrid vessel carrying <sp> -> { {pos=<storeIndex>, slot}, ... }
+-- A census accumulator: classifies bee stacks into per-species bank counts.
+-- Shared by the storage scan (M.scanStorageCensus) and the live cargo read
+-- (M.cargoCensus) so both emit the identical { summary, convertible, slotsByKey }
+-- shape the scheduler + fetch index consume. `loc` tags where each slot lives --
+-- a storage-position index, or the string "cargo" -- so the executor can tell a
+-- resident (already-in-cargo) parent from one that must be fetched from storage.
+local function newCensus()
+  local c = { summary = {}, convertible = {}, convertibleDrones = {}, slotsByKey = {} }
+  local function rec(sp)
+    c.summary[sp] = c.summary[sp] or { purePrincesses = 0, pureDrones = 0 }
+    return c.summary[sp]
+  end
+  local function addSlot(key, loc, slot)
+    c.slotsByKey[key] = c.slotsByKey[key] or {}
+    table.insert(c.slotsByKey[key], { pos = loc, slot = slot })
+  end
+  function c.add(loc, slot, stack)
+    local bee = classifyBee(stack)
+    if not bee then return end
+    if bee.role == "princess" and bee.pure then
+      rec(bee.species).purePrincesses = rec(bee.species).purePrincesses + bee.size
+      addSlot("P:" .. bee.species, loc, slot)
+    elseif bee.role == "princess" then -- hybrid: carrier fodder toward either allele
+      for allele in pairs(bee.alleles) do
+        c.convertible[allele] = (c.convertible[allele] or 0) + bee.size
+        addSlot("V:" .. allele, loc, slot)
+      end
+    elseif bee.role == "drone" and bee.pure then
+      rec(bee.species).pureDrones = rec(bee.species).pureDrones + bee.size
+      addSlot("D:" .. bee.species, loc, slot)
+    elseif bee.role == "drone" then -- hybrid DRONE: carrier fodder for consolidation
+      -- Tracked (was ignored): a mutation yields hybrid drones too, and breeding
+      -- a carrier princess x carrier drone of the same allele is the ONLY way to
+      -- bootstrap the first PURE of a mutated species (~25% pure offspring).
+      for allele in pairs(bee.alleles) do
+        c.convertibleDrones[allele] = (c.convertibleDrones[allele] or 0) + bee.size
+        addSlot("W:" .. allele, loc, slot)
+      end
+    end
+  end
+  return c
+end
+
+-- Scan-ONLY census of the whole storage network (no deposit). Flies to each
+-- store. Refreshes config._bankCensus (the cache the lazy loop trusts between
+-- storage visits) + config._bankConvertible. Returns summary, convertible,
+-- slotsByKey (entries {pos=<storeIndex>, slot}).
+function M.scanStorageCensus(config)
+  if #M.storagePositions(config) == 0 then return {}, {}, {}, {} end
+  local c = newCensus()
+  M.forEachStorageStack(config, function(pos, slot, stack) c.add(pos, slot, stack) end)
+  config._bankCensus = c.summary
+  config._bankConvertible = c.convertible
+  config._bankConvertibleDrones = c.convertibleDrones
+  config._bankSlotsByKey = c.slotsByKey
+  return c.summary, c.convertible, c.slotsByKey, c.convertibleDrones
+end
+
+-- Live census of what's ALREADY in cargo -- free (no travel). Same shape as the
+-- storage scan, but slotsByKey entries are tagged pos="cargo" so the executor
+-- knows those parents are resident and need no fetch. Excludes the honey slot.
+function M.cargoCensus(config)
+  local c = newCensus()
+  for _, cslot in ipairs(config.workingSlots) do
+    if cslot ~= config.honeySlot then
+      c.add("cargo", cslot, invCtrl().getStackInInternalSlot(cslot))
+    end
+  end
+  return c.summary, c.convertible, c.slotsByKey, c.convertibleDrones
+end
+
+-- Pure: sum two census summaries ({ [sp]={purePrincesses,pureDrones} }) into a
+-- new one. Used to give the scheduler the TOTAL available view (cached storage
+-- census + live cargo) without re-scanning storage.
+function M.mergeCensus(a, b)
+  local out = {}
+  local function fold(src)
+    for sp, s in pairs(src or {}) do
+      out[sp] = out[sp] or { purePrincesses = 0, pureDrones = 0 }
+      out[sp].purePrincesses = out[sp].purePrincesses + (s.purePrincesses or 0)
+      out[sp].pureDrones = out[sp].pureDrones + (s.pureDrones or 0)
+    end
+  end
+  fold(a); fold(b)
+  return out
+end
+
+-- Pure: sum two convertible maps ({ [sp]=count }).
+function M.mergeConvertible(a, b)
+  local out = {}
+  for sp, n in pairs(a or {}) do out[sp] = (out[sp] or 0) + n end
+  for sp, n in pairs(b or {}) do out[sp] = (out[sp] or 0) + n end
+  return out
+end
+
+-- Deposit ALL cargo bees into the network, then re-scan. The heavy full-sync
+-- (a storage round trip every call) -- kept for the offload path and any caller
+-- that wants the banks flushed. The lazy genebank loop no longer calls this every
+-- cycle; it breeds from the resident working set and only offloads under cargo
+-- pressure (see M.offloadSurplus).
 function M.syncBanksToStorage(config)
   if #M.storagePositions(config) == 0 then return {}, {}, {} end
-
-  -- 1. Deposit every cargo bee into the network. dropIntoSlot only merges a real
-  -- genotype match (bee items all share one name), else takes an empty slot --
-  -- handled by findStackingSlot inside depositBeesAcrossStores. If the whole
-  -- network is full, halt+beep rather than strand bees (M.onStorageFull).
   local entries = {}
   for _, cslot in ipairs(config.workingSlots) do
     if classifyBee(invCtrl().getStackInInternalSlot(cslot)) then
@@ -1049,49 +1144,17 @@ function M.syncBanksToStorage(config)
     local _, pending = M.depositBeesAcrossStores(config, entries)
     if #pending > 0 then M.onStorageFull(config, pending) end
   end
-
-  -- 2. Scan the whole network for the census (slotsByKey carries {pos, slot} so a
-  -- later fetch knows WHICH store to fly to).
-  local summary, convertible, slotsByKey = {}, {}, {}
-  local function rec(sp)
-    summary[sp] = summary[sp] or { purePrincesses = 0, pureDrones = 0 }
-    return summary[sp]
-  end
-  local function addSlot(key, pos, slot)
-    slotsByKey[key] = slotsByKey[key] or {}
-    table.insert(slotsByKey[key], { pos = pos, slot = slot })
-  end
-  M.forEachStorageStack(config, function(pos, slot, stack)
-    local c = classifyBee(stack)
-    if c then
-      if c.role == "princess" and c.pure then
-        rec(c.species).purePrincesses = rec(c.species).purePrincesses + c.size
-        addSlot("P:" .. c.species, pos, slot)
-      elseif c.role == "princess" then -- hybrid: conversion fodder toward either allele
-        for allele in pairs(c.alleles) do
-          convertible[allele] = (convertible[allele] or 0) + c.size
-          addSlot("V:" .. allele, pos, slot)
-        end
-      elseif c.role == "drone" and c.pure then
-        rec(c.species).pureDrones = rec(c.species).pureDrones + c.size
-        addSlot("D:" .. c.species, pos, slot)
-      end
-    end
-  end)
-  -- Cache the census so the bank-gated discard router (M.isSpeciesBanked) can
-  -- tell, even later in the SAME cycle or in a plain quality/combine phase that
-  -- doesn't re-scan, whether a species is already banked to reserve. Stale-by-a-
-  -- cycle is fine: bank state changes slowly, and a missing/empty cache defaults
-  -- to "not banked" -> preserve, never void.
-  config._bankCensus = summary
-  return summary, convertible, slotsByKey
+  return M.scanStorageCensus(config)
 end
 
 -- Pull one bee named by `entry` ({ pos = <storeIndex>, slot }) into a free cargo
 -- slot, flying to that store first (the census spans the whole network, so the
 -- bee may be in a different store than the robot currently sits at). Returns true
 -- on success.
-local function fetchOne(config, entry)
+local function fetchOne(config, entry, count)
+  count = count or 1
+  -- Already resident in cargo (census tagged it pos="cargo") -> no fetch needed.
+  if entry.pos == "cargo" then return true end
   local down = sides().down
   local free
   for _, cslot in ipairs(config.workingSlots) do
@@ -1102,23 +1165,63 @@ local function fetchOne(config, entry)
   if not pos then return false end
   if not Nav.gotoXZ(pos.x, pos.z) then return false end
   agent().select(free)
-  local moved = invCtrl().suckFromSlot(down, entry.slot, 1)
+  local moved = invCtrl().suckFromSlot(down, entry.slot, count)
   return moved and moved > 0
 end
 
--- Fetch a job's two parents from storage into cargo (already at storage).
--- Returns (true) or (false, reason).
+-- What a job needs as parents, in one place: the census-key + selection criteria
+-- for the princess (a PURE species, or a hybrid VESSEL carrying an allele) and
+-- for the drone (a pure species). Drives the fetch index, the residency check,
+-- and the in-cargo parent selection alike.
+local function jobParentSpec(job)
+  if job.type == "mutate" then
+    return { pKey = "P:" .. job.princess, pSpecies = job.princess, pVessel = false,
+             dKey = "D:" .. job.drone, dSpecies = job.drone }
+  elseif job.type == "grow" then
+    return { pKey = "P:" .. job.species, pSpecies = job.species, pVessel = false,
+             dKey = "D:" .. job.species, dSpecies = job.species }
+  elseif job.type == "convert" then
+    return { pKey = "V:" .. job.to, pAllele = job.to, pVessel = true,
+             dKey = "D:" .. job.to, dSpecies = job.to }
+  elseif job.type == "fix" then
+    -- Consolidate carriers into a PURE: a hybrid princess carrying the allele
+    -- (V:) crossed with a hybrid DRONE carrying it (W:) -> ~25% pure offspring.
+    return { pKey = "V:" .. job.species, pAllele = job.species, pVessel = true,
+             dKey = "W:" .. job.species, dSpecies = job.species, dVessel = true }
+  end
+  return nil
+end
+
+-- Are BOTH of a job's parents already resident in cargo? (cargoKeys is the
+-- cargo-only census index.) If so the whole breeding attempt runs with no storage
+-- trip.
+local function jobParentsResident(job, cargoKeys)
+  local spec = jobParentSpec(job)
+  if not spec then return false end
+  local function has(k) local l = cargoKeys[k]; return l and #l > 0 end
+  return has(spec.pKey) and has(spec.dKey)
+end
+
+-- Fetch a job's two parents into cargo. slotsByKey entries may point at storage
+-- (fly + suck) or at a cargo-resident stack (no-op) -- fetchOne handles both, and
+-- pick() prefers a resident source. The DRONE is pulled as a full STACK
+-- (config.fetchDroneStack, 64 by default) so repeated probabilistic mutation
+-- attempts run straight from cargo without another storage trip; the princess
+-- (one spent per mating) is pulled singly. Returns (true) or (false, reason).
 local function fetchJobParents(config, job, slotsByKey)
-  local function first(key) local l = slotsByKey[key]; return l and l[1] end
-  local ka, kb
-  if job.type == "mutate" then ka, kb = "P:" .. job.princess, "D:" .. job.drone
-  elseif job.type == "grow" then ka, kb = "P:" .. job.species, "D:" .. job.species
-  elseif job.type == "convert" then ka, kb = "V:" .. job.to, "D:" .. job.to end
-  local a, b = first(ka), first(kb)
-  if not a then return false, "no " .. ka end
-  if not b then return false, "no " .. kb end
-  if not fetchOne(config, a) then return false, "pull " .. ka end
-  if not fetchOne(config, b) then return false, "pull " .. kb end
+  local spec = jobParentSpec(job)
+  if not spec then return false, "unknown_job_type" end
+  local function pick(key)
+    local l = slotsByKey[key]
+    if not l or #l == 0 then return nil end
+    for _, e in ipairs(l) do if e.pos == "cargo" then return e end end -- prefer resident
+    return l[1]
+  end
+  local a, b = pick(spec.pKey), pick(spec.dKey)
+  if not a then return false, "no " .. spec.pKey end
+  if not b then return false, "no " .. spec.dKey end
+  if not fetchOne(config, a, 1) then return false, "pull " .. spec.pKey end
+  if not fetchOne(config, b, config.fetchDroneStack or 64) then return false, "pull " .. spec.dKey end
   return true
 end
 
@@ -1152,6 +1255,7 @@ local function executeJobAtApiary(config, site, job)
 
   if job.type == "grow" then return "growing " .. job.species .. " bank" end
   if job.type == "convert" then return "converting toward " .. job.to end
+  if job.type == "fix" then return "fixing carriers into pure " .. job.species end
   local toward = (job.result ~= site.targetSpecies) and (" toward " .. job.result) or ""
   return "mutating " .. job.princess .. " x " .. job.drone .. toward
 end
@@ -1160,7 +1264,7 @@ end
 -- the given `target` species. Base species = graph LEAVES we actually hold (so
 -- the plan never routes through a breeder we lack; a missing one surfaces as
 -- "blocked: need pristine X").
-function M.buildSchedulerState(config, site, summary, convertible, target)
+function M.buildSchedulerState(config, site, summary, convertible, target, convertibleDrones)
   local graph = config.mutationGraph
   local opts = config.genebank
   local base = {}
@@ -1173,8 +1277,8 @@ function M.buildSchedulerState(config, site, summary, convertible, target)
     banks[sp] = { purePrincesses = s.purePrincesses, pureDrones = s.pureDrones }
   end
   local state = {
-    banks = banks, convertible = convertible, steps = plan.steps,
-    baseSpecies = base, target = target,
+    banks = banks, convertible = convertible, convertibleDrones = convertibleDrones or {},
+    steps = plan.steps, baseSpecies = base, target = target,
     minPrincesses = GB.minPrincesses(opts), minDrones = GB.minDrones(opts),
     recoveryDrones = GB.recoveryDrones(opts),
   }
@@ -1230,7 +1334,7 @@ end
 -- banks to storage, choose the target (fixed for mutation, next-unbanked for
 -- rainbow), ask the scheduler for the next job, fetch its parents, and breed them.
 function M.runGenebankSchedule(config, site)
-  local summary, convertible, slotsByKey = M.syncBanksToStorage(config)
+  local summary, convertible, slotsByKey, convertibleDrones = M.syncBanksToStorage(config)
 
   local target, remaining = site.targetSpecies, nil
   if site.mode == "rainbow" then
@@ -1249,7 +1353,7 @@ function M.runGenebankSchedule(config, site)
     end
   end
 
-  local state, plan = M.buildSchedulerState(config, site, summary, convertible, target)
+  local state, plan = M.buildSchedulerState(config, site, summary, convertible, target, convertibleDrones)
   local job = Sched.nextJob(state)
   if job.type == "done" then
     -- Rainbow's target is always an UNBANKED species, so the scheduler only

@@ -84,8 +84,12 @@ do
 end
 
 -- ============================================================
--- applyMutation: a mutation yields a purebred DEFAULT bee of the result
--- species -- its good alleles come from the TEMPLATE, not the parents.
+-- applyMutation: a mutation yields a HYBRID (real Forestry) -- the result
+-- species' template lands on the ACTIVE side (how its good alleles ENTER the
+-- pool), while the INACTIVE side keeps the Mendelian allele inherited from a
+-- parent. So the offspring is Result/parent, never purebred Result; a pure
+-- Result is only reached later by breeding two carriers together (the
+-- scheduler's `fix` job). Modelling it as instantly-pure hid a real dead-end.
 -- ============================================================
 
 do
@@ -101,25 +105,28 @@ do
   local templates = { Ended = { fertility = 4, nocturnal = true } }
   Sim.applyMutation(child, "Ended", templates, traitList)
 
-  check("applyMutation sets species purebred to the result",
-    child.species.active.name == "Ended" and child.species.inactive.name == "Ended")
-  check("applyMutation injects the template's good fertility (active+inactive)",
-    child.fertility.active == 4 and child.fertility.inactive == 4)
-  check("applyMutation injects the template's good nocturnal",
-    child.nocturnal.active == true and child.nocturnal.inactive == true)
-  check("applyMutation fills non-override traits from the base default (lifespan 20)",
-    child.lifespan.active == 20 and child.lifespan.inactive == 20,
-    "got " .. tostring(child.lifespan.active))
+  check("applyMutation makes a HYBRID: Result active, inherited parent allele inactive",
+    child.species.active.name == "Ended" and child.species.inactive.name == "Meadows",
+    "got " .. tostring(child.species.active.name) .. "/" .. tostring(child.species.inactive.name))
+  check("applyMutation puts the template's good fertility on the ACTIVE side, keeps inherited inactive",
+    child.fertility.active == 4 and child.fertility.inactive == 1,
+    "got " .. tostring(child.fertility.active) .. "/" .. tostring(child.fertility.inactive))
+  check("applyMutation puts the template's good nocturnal active, keeps inherited inactive",
+    child.nocturnal.active == true and child.nocturnal.inactive == false)
+  check("non-override trait: active from base default (lifespan 20), inactive inherited (60)",
+    child.lifespan.active == 20 and child.lifespan.inactive == 60,
+    "got " .. tostring(child.lifespan.active) .. "/" .. tostring(child.lifespan.inactive))
 end
 
 do
-  -- Without templates, applyMutation only changes the species locus (backward
-  -- compatible with mutation/rainbow modes).
+  -- Without templates, applyMutation only changes the species locus (active side),
+  -- leaving the child a hybrid with the inherited inactive allele intact.
   local child = { species = { active = { name = "A" }, inactive = { name = "B" } },
                   fertility = { active = 1, inactive = 1 } }
   Sim.applyMutation(child, "Common", nil, { "species", "fertility" })
-  check("applyMutation without templates leaves non-species traits untouched",
-    child.species.active.name == "Common" and child.fertility.active == 1)
+  check("applyMutation without templates: Result active, inherited species inactive, traits untouched",
+    child.species.active.name == "Common" and child.species.inactive.name == "B"
+      and child.fertility.active == 1)
 end
 
 print("")

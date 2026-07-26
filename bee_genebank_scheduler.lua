@@ -56,7 +56,8 @@ end
 -- }
 function M.nextJob(state)
   local banks = state.banks or {}
-  local convertible = state.convertible or {}
+  local convertible = state.convertible or {}       -- hybrid PRINCESSES carrying an allele
+  local convertibleDrones = state.convertibleDrones or {} -- hybrid DRONES carrying an allele
   local steps = state.steps or {}
   local base = state.baseSpecies or {}
   local target = state.target
@@ -113,7 +114,19 @@ function M.nextJob(state)
     local aHasPrincess = bankOf(banks, A).purePrincesses >= 1
     local bHasDrone = bankOf(banks, B).pureDrones >= 1
 
+    -- A mutation yields only HYBRIDS -- carriers of X, never a pure X. The ONLY
+    -- way to get the first pure X is to breed a carrier PRINCESS x carrier DRONE
+    -- of X together (~25% pure). So whenever X still lacks pure stock but carriers
+    -- of BOTH roles exist, consolidate them first -- otherwise the scheduler would
+    -- mutate forever, banking hybrid after hybrid and never bootstrapping a pure
+    -- (the real-hardware dead-end this fixes). fix also seeds the first pure DRONES
+    -- (offspring drones are ~25% pure too), which then let `grow` build the bank.
+    local canFix = (convertible[X] or 0) >= 1 and (convertibleDrones[X] or 0) >= 1
+
     if have.purePrincesses < tp then
+      if have.purePrincesses < 1 and canFix then
+        return { type = "fix", species = X }
+      end
       -- Need (more) X princesses -> mutate, if the parents can supply a
       -- princess of A and a drone of B right now.
       if aHasPrincess and bHasDrone then
@@ -130,6 +143,10 @@ function M.nextJob(state)
       -- Grow X's drone bank BEFORE it's spent as a parent upstream.
       if have.pureDrones >= 1 then
         return { type = "grow", species = X }
+      end
+      -- No pure X drone yet: consolidate carriers to seed the first pure drones.
+      if canFix then
+        return { type = "fix", species = X }
       end
       -- Have an X princess but no X drone yet -> mutate more X to seed drones.
       if aHasPrincess and bHasDrone then
