@@ -176,8 +176,17 @@ local function main(args)
 
   while true do
     local log = M.runCycle(config)
-    if not uiEnabled then
-      for _, line in ipairs(log) do
+    -- Always record each cycle's status lines to the log. In UI mode we don't
+    -- want them scribbling over the dashboard, but they still MUST reach
+    -- bee_keeper.log -- otherwise a `ui` run leaves the log with zero scheduler
+    -- decisions (only startup + stray diag prints), which is exactly what made
+    -- live behaviour undiagnosable. realLogLine writes straight to the file
+    -- without touching the screen; plain print (which is tee'd) is used when
+    -- there's no dashboard to protect.
+    for _, line in ipairs(log) do
+      if uiEnabled then
+        if logFile then logFile:write(tostring(line) .. "\n"); logFile:flush() end
+      else
         print(line)
       end
     end
