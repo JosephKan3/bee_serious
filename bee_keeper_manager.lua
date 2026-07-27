@@ -1118,7 +1118,7 @@ end
 function M.scanStorageCensus(config)
   if #M.storagePositions(config) == 0 then return {}, {}, {}, {} end
   local c = newCensus()
-  M.forEachStorageStack(config, function(pos, slot, stack) c.add(pos, slot, stack) end)
+  M.forEachStorageStack(config, function(pos, slot, stack) c.add(pos, slot, stack) end, "Scanning storage")
   config._bankCensus = c.summary
   config._bankConvertible = c.convertible
   config._bankConvertibleDrones = c.convertibleDrones
@@ -1236,6 +1236,7 @@ function M.offloadSurplus(config)
   end
   if #toDeposit == 0 then return 0 end
 
+  Status.setStep(string.format("Offloading %d surplus bee(s) to storage", #toDeposit))
   local dropped, pending = M.depositBeesAcrossStores(config, toDeposit)
   if #pending > 0 then M.onStorageFull(config, pending) end
   return dropped
@@ -1344,6 +1345,7 @@ local function fetchJobParents(config, job, slotsByKey)
   local a, b = pick(spec.pKey), pick(spec.dKey)
   if not a then return false, "no " .. spec.pKey end
   if not b then return false, "no " .. spec.dKey end
+  Status.setStep(string.format("Fetching %s + %s from storage", spec.pKey, spec.dKey))
   if not fetchOne(config, a, 1) then return false, "pull " .. spec.pKey end
   if not fetchOne(config, b, config.fetchDroneStack or 64) then return false, "pull " .. spec.dKey end
   return true
@@ -1383,6 +1385,20 @@ local function executeJobAtApiary(config, site, job)
   local down = sides().down
   local spec = jobParentSpec(job)
   if not spec then return "unknown_job_type" end
+
+  -- Announce WHAT this apiary visit is doing (the scheduler's job), so the
+  -- dashboard shows "Fixing carriers into pure Common" etc. instead of leaving
+  -- Nav's stale "Walking to (x,z)" up while it loads the pair.
+  local jobSteps = {
+    grow = "Growing " .. tostring(job.species) .. " drone bank",
+    convert = "Converting a hybrid toward " .. tostring(job.to),
+    fix = "Fixing carriers into pure " .. tostring(job.species),
+    seedDrone = "Seeding " .. tostring(job.species) .. " carrier drones",
+    seedPrincess = "Seeding " .. tostring(job.species) .. " carrier princesses",
+    mutate = "Mutating " .. tostring(job.princess) .. " x " .. tostring(job.drone)
+      .. (job.result and (" -> " .. tostring(job.result)) or ""),
+  }
+  if jobSteps[job.type] then Status.setStep(jobSteps[job.type] .. " at " .. (site.name or "?")) end
 
   -- GREEDY, FERTILITY-AWARE parent selection (the user's rule: breed the parent
   -- matching the most target slots -- species AND stats -- not the first found).
@@ -1772,12 +1788,15 @@ end
 -- ============================================================
 
 -- Visit every storage block and call fn(posIndex, slot, stack) for each non-empty
--- slot. Leaves the robot at the LAST store visited.
-function M.forEachStorageStack(config, fn)
+-- slot. Leaves the robot at the LAST store visited. Optional `label` is set as
+-- the dashboard step at each store, so a sweep shows what it's DOING there (e.g.
+-- "Scanning storage") instead of Nav's bare "Walking to (x,z)".
+function M.forEachStorageStack(config, fn, label)
   local positions = M.storagePositions(config)
   local down = sides().down
   for pi, pos in ipairs(positions) do
     if Nav.gotoXZ(pos.x, pos.z) then
+      if label then Status.setStep(string.format("%s (%d/%d)", label, pi, #positions)) end
       local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
       for s = 1, size do
         local stack = invCtrl().getStackInSlot(down, s)
@@ -2037,6 +2056,20 @@ function M.isSpeciesBanked(config, species)
   return rec.pureDrones >= minD
 end
 
+-- Does `species` have a SELF-SUSTAINING pure set -- at least one pure princess
+-- AND one pure drone -- so more pure copies of it can always be bred? This is a
+-- stronger, safer gate than isSpeciesBanked for deciding a hybrid is discardable:
+-- a hybrid carries TWO species, and it may be the only carrier of the genes of
+-- EITHER of them, so it's only truly redundant once BOTH its species can stand
+-- on their own. Reads the census cache; no genebank config / not scanned -> false.
+function M.speciesHasPureSet(config, species)
+  local census = config._bankCensus
+  if not census then return false end
+  local rec = census[species]
+  if not rec then return false end
+  return (rec.purePrincesses or 0) >= 1 and (rec.pureDrones or 0) >= 1
+end
+
 -- PURE, unit-tested. Splits discard entries into (trashable, preserve). A drone
 -- is trash-eligible only when EVERY species allele it carries is already banked
 -- -- until then it may be the only seed for that species' bank, so it's
@@ -2106,19 +2139,31 @@ end
 -- banked (nothing is redundant yet).
 function M.cullBankedHybrids(config)
   if not config.trashPos then return 0 end -- nowhere to void -> keep everything
+  -- THROTTLE: this does a storage sweep + trash trip, so don't run it every
+  -- pressured cycle (that would pile onto the storage traffic we're trying to
+  -- keep low). The hoard grows slowly; culling every Nth storage visit drains it
+  -- without adding a sweep to most visits. config.cullEveryVisits overrides.
+  config._cullVisits = (config._cullVisits or 0) + 1
+  if (config._cullVisits % (config.cullEveryVisits or 8)) ~= 0 then return 0 end
   if not config._bankCensus then M.scanStorageCensus(config) end
 
-  local anyBanked = false
+  local anyPureSet = false
   for sp in pairs(config._bankCensus or {}) do
-    if M.isSpeciesBanked(config, sp) then anyBanked = true; break end
+    if M.speciesHasPureSet(config, sp) then anyPureSet = true; break end
   end
-  if not anyBanked then return 0 end -- early game: no full bank yet, nothing redundant
+  if not anyPureSet then return 0 end -- early game: nothing has a pure set yet
+  Status.setStep("Culling redundant hybrids of banked species")
 
   local function cullEligible(stack)
     local c = classifyBee(stack)
     if not c or c.pure then return false end -- non-bee / purebred -> keep
-    if not M.isSpeciesBanked(config, c.species) then return false end -- fodder -> keep
-    if c.role == "drone" then return true end -- hybrid drone of a banked species
+    -- A hybrid carries TWO species (active + inactive) -- it may be the only
+    -- carrier of EITHER. Discard it only once BOTH already have a self-sustaining
+    -- pure set (pure princess AND drone), else keep it as that species' seed.
+    for sp in pairs(c.alleles) do
+      if not M.speciesHasPureSet(config, sp) then return false end
+    end
+    if c.role == "drone" then return true end -- redundant hybrid drone
     local ind = readIndividual(stack) -- hybrid princess: trash only IGNOBLE (bred) ones
     return (ind and ind.isNatural == false) or false
   end
@@ -2155,7 +2200,7 @@ function M.cullBankedHybrids(config)
         end
       end
     end
-  end)
+  end, "Culling redundant hybrids")
 
   if #entries == 0 then return 0 end
   local voided = M.dumpToTrash(config, entries)

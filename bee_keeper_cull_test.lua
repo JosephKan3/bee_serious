@@ -1,9 +1,10 @@
 --[[
   Unit test for M.cullBankedHybrids -- the anti-hoarding sweep.
-  Policy (recommended): once a species has a full purebred bank (>= minDrones
-  pure drones), trash its hybrid DRONES and its IGNOBLE (isNatural==false) hybrid
-  princesses, from BOTH cargo and storage. Keep purebred bees, PRISTINE hybrid
-  princesses (renewable / fix-fodder), and every bee of a not-yet-banked species.
+  Policy: trash a hybrid ONLY once BOTH species it carries have a self-sustaining
+  pure set (a pure princess AND a pure drone). Of those, trash hybrid DRONES and
+  IGNOBLE (isNatural==false) hybrid princesses; keep PRISTINE hybrid princesses.
+  Never touch purebred bees, or any hybrid carrying a species that lacks a pure
+  set yet (it may be that species' only carrier). Applies to cargo AND storage.
 ]]
 
 local failures = 0
@@ -12,10 +13,10 @@ local function check(name, cond, detail)
   else failures = failures + 1; print("FAIL " .. name .. (detail and (" -- " .. detail) or "")) end
 end
 
--- Build a fresh, reset sim world seeded with a genebank config + the fixture
--- bees. `commonBanked` decides whether the 8 pure Common drones (the bank) are
--- seeded, so we can test both the banked and not-yet-banked gate.
-local function setup(commonBanked)
+-- Fresh, reset sim world + genebank config + fixture bees. `withPureSets` decides
+-- whether Common AND Forest get pure princess+drone sets, so we can test both the
+-- discardable case and the gate that preserves everything before a pure set exists.
+local function setup(withPureSets)
   package.loaded["bee_keeper_manager_config"] = nil
   local config = require("bee_keeper_manager_config")
   config.honeySlot = 1
@@ -27,6 +28,7 @@ local function setup(commonBanked)
   config.trashPos = { x = 4, z = -3 }
   config.chargerPos = { x = 0, z = 0 }
   config.genebank = { minPrincesses = 1, minDrones = 8 }
+  config.cullEveryVisits = 1 -- run the cull on every call (no throttle) for a deterministic test
   local sites = { { name = "site1", x = 2, z = -2, mode = "traitmax" } }
   config.sites = sites
 
@@ -54,22 +56,25 @@ local function setup(commonBanked)
     local st = Sim.toStack(raw, kind, true); st.size = size or 1; store[slot] = st
   end
 
-  local prim = world.storage
-  if commonBanked then put(prim, 1, pureRaw("Common"), "drone", 8) end -- the bank
-  put(prim, 2, pureRaw("Common"), "princess", 1)                      -- pure princess (keep)
-  put(prim, 3, hybridRaw("Common", "Forest", true), "drone", 5)       -- banked hybrid drone -> trash
-  put(prim, 4, hybridRaw("Common", "Forest", false), "princess", 1)   -- ignoble hyb princess -> trash
-  put(prim, 5, hybridRaw("Common", "Forest", true), "princess", 1)    -- PRISTINE hyb princess (keep)
-  put(prim, 6, hybridRaw("Forest", "Meadows", true), "drone", 4)      -- non-banked hybrid (keep)
-  put(world.storages[2].slots, 1, pureRaw("Common"), "princess", 1)   -- pure princess, 2nd store (keep)
-  put(world.drone.inventory, 2, hybridRaw("Common", "Forest", true), "drone", 3) -- cargo banked hyb drone -> trash
-  put(world.drone.inventory, 3, pureRaw("Common"), "drone", 2)        -- cargo pure drone (keep)
+  local prim, store2 = world.storage, world.storages[2].slots
+  if withPureSets then
+    -- Pure sets (princess + drone) for BOTH Common and Forest -> both discardable.
+    put(prim, 1, pureRaw("Common"), "drone", 8)
+    put(prim, 2, pureRaw("Common"), "princess", 1)
+    put(store2, 1, pureRaw("Forest"), "drone", 8)
+    put(store2, 2, pureRaw("Forest"), "princess", 1)
+  end
+  put(prim, 3, hybridRaw("Common", "Forest", true), "drone", 5)     -- both pure -> TRASH
+  put(prim, 4, hybridRaw("Common", "Forest", false), "princess", 1) -- ignoble    -> TRASH
+  put(prim, 5, hybridRaw("Common", "Forest", true), "princess", 1)  -- PRISTINE   -> KEEP
+  put(prim, 6, hybridRaw("Common", "Meadows", true), "drone", 4)    -- Meadows unbanked -> KEEP
+  put(world.drone.inventory, 2, hybridRaw("Common", "Forest", true), "drone", 3) -- cargo -> TRASH
+  put(world.drone.inventory, 3, pureRaw("Common"), "drone", 2)      -- pure       -> KEEP
 
   require("bee_keeper_nav").setHome(70)
   return config, world, M
 end
 
--- Count surviving bees across storage + cargo by a compact genotype/role key.
 local function census(world)
   local n = {}
   local function tally(stack)
@@ -86,37 +91,39 @@ local function census(world)
   return n
 end
 
--- ---- banked: the redundant hybrids get voided, everything else survives ----
+-- ---- both species have a pure set: redundant hybrids voided, rest survives ----
 do
   local config, world, M = setup(true)
   M.scanStorageCensus(config)
-  check("Common is banked (>= minDrones pure drones)", M.isSpeciesBanked(config, "Common"))
-  check("Forest is NOT banked", not M.isSpeciesBanked(config, "Forest"))
+  check("Common has a pure set", M.speciesHasPureSet(config, "Common"))
+  check("Forest has a pure set", M.speciesHasPureSet(config, "Forest"))
+  check("Meadows has NO pure set", not M.speciesHasPureSet(config, "Meadows"))
 
   local voided = M.cullBankedHybrids(config)
   check("cull voided the 3 redundant stacks", voided == 3, "voided=" .. tostring(voided))
 
   local n = census(world)
-  check("banked hybrid DRONES trashed (cargo + storage)", (n["Common/Forest|hyb|drone|nat=true"] or 0) == 0)
-  check("IGNOBLE hybrid princess trashed", (n["Common/Forest|hyb|princess|nat=false"] or 0) == 0)
-  check("PRISTINE hybrid princess kept", (n["Common/Forest|hyb|princess|nat=true"] or 0) == 1)
-  check("pure drones kept (the bank untouched)", (n["Common/Common|pure|drone|nat=true"] or 0) == 10)
-  check("pure princesses kept", (n["Common/Common|pure|princess|nat=true"] or 0) == 2)
-  check("non-banked (Forest) hybrid drone kept as fodder", (n["Forest/Meadows|hyb|drone|nat=true"] or 0) == 4)
+  check("Common/Forest hybrid DRONES trashed (cargo + storage)", (n["Common/Forest|hyb|drone|nat=true"] or 0) == 0)
+  check("IGNOBLE Common/Forest princess trashed", (n["Common/Forest|hyb|princess|nat=false"] or 0) == 0)
+  check("PRISTINE Common/Forest princess kept", (n["Common/Forest|hyb|princess|nat=true"] or 0) == 1)
+  check("Common/Meadows hybrid kept (Meadows has no pure set)", (n["Common/Meadows|hyb|drone|nat=true"] or 0) == 4)
+  check("pure Common bees kept", (n["Common/Common|pure|drone|nat=true"] or 0) == 10
+    and (n["Common/Common|pure|princess|nat=true"] or 0) == 1)
+  check("pure Forest bank kept", (n["Forest/Forest|pure|drone|nat=true"] or 0) == 8)
 end
 
--- ---- not banked: the gate preserves EVERYTHING (nothing redundant yet) ----
+-- ---- no pure set yet: the gate preserves EVERYTHING ----
 do
   local config, world, M = setup(false)
   M.scanStorageCensus(config)
-  check("Common NOT banked without the drone bank", not M.isSpeciesBanked(config, "Common"))
+  check("nothing discardable before a pure set exists", not M.speciesHasPureSet(config, "Common"))
 
   local voided = M.cullBankedHybrids(config)
-  check("cull voids nothing before anything is banked", voided == 0, "voided=" .. tostring(voided))
+  check("cull voids nothing before a pure set exists", voided == 0, "voided=" .. tostring(voided))
 
   local n = census(world)
-  check("Common hybrid drones preserved (still fodder)", (n["Common/Forest|hyb|drone|nat=true"] or 0) == 8)
-  check("ignoble hybrid princess preserved (still fodder)", (n["Common/Forest|hyb|princess|nat=false"] or 0) == 1)
+  check("Common/Forest hybrid drones preserved as fodder", (n["Common/Forest|hyb|drone|nat=true"] or 0) == 8)
+  check("ignoble hybrid princess preserved as fodder", (n["Common/Forest|hyb|princess|nat=false"] or 0) == 1)
 end
 
 print("")
