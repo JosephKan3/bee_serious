@@ -1206,24 +1206,49 @@ end
 -- just fetched at 64 -- stays for probabilistic retries); everything beyond that
 -- is deposited. Never trashes; the whole point is to preserve, just off-cargo.
 -- Returns the number deposited.
-function M.offloadSurplus(config)
+-- Census keys a cargo bee would occupy (mirrors newCensus.add), used to tell
+-- whether a bee is one of the CURRENT job's parents.
+local function beeCensusKeys(bee)
+  if bee.role == "princess" and bee.pure then return { "P:" .. bee.species } end
+  if bee.role == "princess" then
+    local k = {}; for a in pairs(bee.alleles) do k[#k + 1] = "V:" .. a end; return k
+  end
+  if bee.role == "drone" and bee.pure then return { "D:" .. bee.species } end
+  local k = {}; for a in pairs(bee.alleles) do k[#k + 1] = "W:" .. a end; return k
+end
+
+function M.offloadSurplus(config, protectKeys)
   local reserve = config.extractReserve or 3
   if M.cargoFreeSlots(config) >= reserve then return 0 end -- not pressured
+  protectKeys = protectKeys or {}
+
+  -- Is this bee one of the current job's parents (by census key)? Kept resident
+  -- FIRST so consecutive fix/seed attempts breed straight from cargo instead of
+  -- re-fetching the same carriers from storage every cycle (the storage-thrash).
+  local function isProtected(bee)
+    for _, key in ipairs(beeCensusKeys(bee)) do if protectKeys[key] then return true end end
+    return false
+  end
 
   local princesses, drones = {}, {}
   for _, cslot in ipairs(config.workingSlots) do
     if cslot ~= config.honeySlot then
       local bee = classifyBee(invCtrl().getStackInInternalSlot(cslot))
       if bee then
-        local rec = { slot = cslot, size = bee.size }
+        local rec = { slot = cslot, size = bee.size, protected = isProtected(bee) }
         if bee.role == "princess" then princesses[#princesses + 1] = rec
         elseif bee.role == "drone" then drones[#drones + 1] = rec end
       end
     end
   end
-  -- Keep the LARGEST drone stacks (the fetched 64-donor sticks around); shed the
-  -- small offspring piles first.
-  table.sort(drones, function(x, y) return x.size > y.size end)
+  -- Keep the job's parents first, then the LARGEST stacks (the fetched 64-donor
+  -- sticks around); shed unprotected, smaller piles first.
+  local function keepRank(x, y)
+    if x.protected ~= y.protected then return x.protected end -- protected first
+    return x.size > y.size
+  end
+  table.sort(princesses, keepRank)
+  table.sort(drones, keepRank)
 
   local keepP = M.residentPrincessTarget(config)
   local keepD = config.workingDroneStacks or 4
@@ -1589,7 +1614,14 @@ function M.runGenebankSchedule(config, site)
   if resident and not pressured then
     slotsByKey = cargoKeys
   else
-    if pressured then M.offloadSurplus(config) end
+    if pressured then
+      -- Protect THIS job's parents from being offloaded, so the next attempt of
+      -- the same job (fix/seed loops repeat for many cycles) finds them resident
+      -- and doesn't fly back to storage to re-fetch the identical carriers.
+      local jspec = jobParentSpec(job)
+      local protect = jspec and { [jspec.pKey] = true, [jspec.dKey] = true } or nil
+      M.offloadSurplus(config, protect)
+    end
     M.scanStorageCensus(config) -- refresh cache (+ _bankSlotsByKey) after any deposit
     -- Void redundant hybrids of already-banked species (cargo + storage) before
     -- rebuilding slotsByKey, so a trashed slot is never handed to fetchJobParents.
