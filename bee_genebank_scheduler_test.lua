@@ -184,10 +184,24 @@ end
 do
   -- A pure Common princess already exists but no Common drones, and carriers of
   -- both roles are around -> fix seeds the first pure DRONES (grow needs a pure
-  -- drone to start, which we don't have).
+  -- drone to start, which we don't have). fix is preferred here because it spends
+  -- CARRIERS, preserving the pure princess.
   local j = S.nextJob(stateD(withBase({ Common = b(1, 0) }), { Common = 1 }, { Common = 1 }))
   check("fix to seed first pure drones when princess exists but no pure drone",
     j.type == "fix" and j.species == "Common", j.type .. "/" .. tostring(j.species))
+end
+
+do
+  -- REGRESSION (the "threw away a pure Forest" bug): a pure Common princess exists,
+  -- no Common drones, and ONLY a carrier DRONE (W:Common) -- no carrier princess,
+  -- so fix is impossible. The old scheduler fell to seedPrincess (pure Forest x
+  -- carrier), sacrificing a foreign purebred to manufacture a carrier princess.
+  -- Now it must breed the pure Common princess we already hold x the carrier drone
+  -- -> ~50% pure Common drones, wasting nothing.
+  local j = S.nextJob(stateD(withBase({ Common = b(1, 0) }), {}, { Common = 1 }))
+  check("pure princess + carrier drone (no carrier princess) -> growDrone, NOT seedPrincess",
+    j.type == "growDrone" and j.species == "Common",
+    j.type .. "/" .. tostring(j.species or j.princess))
 end
 
 do

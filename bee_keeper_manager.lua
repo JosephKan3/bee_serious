@@ -1464,6 +1464,13 @@ local function jobParentSpec(job)
   elseif job.type == "grow" then
     return { pKey = "P:" .. job.species, pSpecies = job.species, pVessel = false,
              dKey = "D:" .. job.species, dSpecies = job.species }
+  elseif job.type == "growDrone" then
+    -- Bootstrap the first pure DRONES from a pure X princess we already hold x a
+    -- carrier X drone (W:) -> ~50% pure X drones. Mirror of `convert` (which
+    -- renews the princess line); this renews/seeds the drone line without
+    -- sacrificing a foreign pure parent.
+    return { pKey = "P:" .. job.species, pSpecies = job.species, pVessel = false,
+             dKey = "W:" .. job.species, dSpecies = job.species, dVessel = true }
   elseif job.type == "convert" then
     return { pKey = "V:" .. job.to, pAllele = job.to, pVessel = true,
              dKey = "D:" .. job.to, dSpecies = job.to }
@@ -1560,6 +1567,7 @@ local function executeJobAtApiary(config, site, job)
   -- Nav's stale "Walking to (x,z)" up while it loads the pair.
   local jobSteps = {
     grow = "Growing " .. tostring(job.species) .. " drone bank",
+    growDrone = "Growing " .. tostring(job.species) .. " drones (pure princess x carrier)",
     convert = "Converting a hybrid toward " .. tostring(job.to),
     fix = "Fixing carriers into pure " .. tostring(job.species),
     seedDrone = "Seeding " .. tostring(job.species) .. " carrier drones",
@@ -1613,6 +1621,7 @@ local function executeJobAtApiary(config, site, job)
   if not beekeeper().swapDrone(down) then return "swap_drone_failed" end
 
   if job.type == "grow" then return "growing " .. job.species .. " bank" end
+  if job.type == "growDrone" then return "growing " .. job.species .. " drones (pure princess x carrier)" end
   if job.type == "convert" then return "converting toward " .. job.to end
   if job.type == "fix" then return "fixing carriers into pure " .. job.species end
   if job.type == "seedDrone" then return "seeding " .. job.species .. " carrier drones (x pure " .. job.drone .. ")" end
@@ -1732,7 +1741,7 @@ function M.runGenebankSchedule(config, site)
   -- exactly what the scheduler saw for the job's species + the pure parent it's
   -- about to spend, plus the RAW cargo bees of those species (active/inactive/
   -- pure), so the next run shows whether the pure bee is being bucketed wrong.
-  if job.type == "seedPrincess" or job.type == "seedDrone" or job.type == "fix" or job.type == "grow" then
+  if job.type == "seedPrincess" or job.type == "seedDrone" or job.type == "fix" or job.type == "grow" or job.type == "growDrone" then
     local watch = {}
     local function mark(sp) if sp then watch[sp] = true end end
     mark(job.species); mark(job.princess); mark(job.drone); mark(job.to); mark(target)

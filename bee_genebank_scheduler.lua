@@ -175,11 +175,25 @@ function M.nextJob(state)
         return { type = "grow", species = X }
       end
       -- No pure X drone yet: consolidate carriers to seed the first pure drones.
+      -- Preferred when BOTH carrier roles exist because it preserves the pure X
+      -- princess (fix spends carriers, not her).
       if canFix then
         return { type = "fix", species = X }
       end
-      -- Only one carrier role -> spread X into the missing role from pure parents
-      -- (same rationale as above), so `fix` can then seed the pure drones.
+      -- fix isn't possible (only ONE carrier role), BUT we hold a pure X PRINCESS
+      -- and a carrier X DRONE (W:X): breed her x the carrier -> ~50% pure X drones
+      -- directly (mom is pure X, so each offspring drone gets X from her and
+      -- X-or-other from the carrier). This is the key win over the seedPrincess
+      -- fallback below -- it seeds the drone bank from a bee we already hold
+      -- instead of sacrificing a FOREIGN pure parent (the pure-Forest-thrown-away
+      -- waste). Her offspring princess is also ~50% pure X, so the princess line is
+      -- largely conserved, not spent.
+      if haveW and have.purePrincesses >= 1 then
+        return { type = "growDrone", species = X }
+      end
+      -- Only one carrier role and no pure X princess to seed drones from -> spread
+      -- X into the missing role from pure parents (same rationale as above), so
+      -- `fix` can then seed the pure drones.
       if haveV and not haveW and bHasDrone then
         return { type = "seedDrone", species = X, drone = B }
       end

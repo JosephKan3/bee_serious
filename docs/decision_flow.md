@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.6.15** (2026-07-27).
+> Last verified against code: **v0.6.17** (2026-07-27).
 
 ---
 
@@ -143,11 +143,28 @@ its own configured mode.
 ### Genebank scheduler jobs (acquire / rainbow)
 
 The scheduler builds each species' purebred bank bottom-up and only spends a bank
-once it's stocked. Job types: `mutate`, `grow`, `convert`, `fix`, `seedDrone`,
-`seedPrincess`, `done`, `blocked`. `executeJobAtApiary` picks parents **greedily and
-fertility-aware** — the princess closest to the pure target, then the drone that
-best complements her, species weighted high so consolidation never trades species
-purity for a stat.
+once it's stocked. Job types: `mutate`, `grow`, `growDrone`, `convert`, `fix`,
+`seedDrone`, `seedPrincess`, `done`, `blocked`. `executeJobAtApiary` picks parents
+**greedily and fertility-aware** — the princess closest to the pure target, then
+the drone that best complements her, species weighted high so consolidation never
+trades species purity for a stat.
+
+**Bootstrapping a species' DRONE bank** (X needs pure drones, has none yet) follows
+this preference order, cheapest/least-wasteful first:
+1. `grow` — pure X princess × pure X drone (once ≥1 pure drone exists).
+2. `fix` — carrier princess (V:X) × carrier drone (W:X) → ~25% pure. Preferred when
+   both carrier roles exist because it spends carriers and **preserves** the pure
+   princess.
+3. `growDrone` — pure X princess × carrier drone (W:X) → ~50% pure X drones. Used
+   when `fix` is impossible (no carrier princess) **but a pure X princess is already
+   held**. This replaced a real bug where the scheduler instead ran `seedPrincess`
+   (pure *Forest* × carrier), sacrificing a foreign purebred to manufacture a
+   carrier princess while ignoring the pure X princess sitting in cargo. `growDrone`
+   seeds the drone bank from a bee already held and wastes nothing; the offspring
+   princess is also ~50% pure X, so the princess line is largely conserved.
+4. `seedPrincess` / `seedDrone` — last resort: spread X into the missing carrier
+   role from a pure *parent-species* bee, only when no pure X princess is available
+   to `growDrone` from.
 
 **Key genetics reality (GTNH/Forestry):** mutations yield **hybrids**, not pure
 offspring. A pure species is bootstrapped from two carriers (the `fix` job) at
