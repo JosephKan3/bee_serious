@@ -1575,6 +1575,10 @@ function M.runGenebankSchedule(config, site)
   else
     if pressured then M.offloadSurplus(config) end
     M.scanStorageCensus(config) -- refresh cache (+ _bankSlotsByKey) after any deposit
+    -- Void redundant hybrids of already-banked species (cargo + storage) before
+    -- rebuilding slotsByKey, so a trashed slot is never handed to fetchJobParents.
+    -- Piggybacks on this storage visit we're already making; re-scans if it culled.
+    M.cullBankedHybrids(config)
     local _, _, freshCargoKeys = M.cargoCensus(config)
     slotsByKey = M.mergeSlotsByKey(config._bankSlotsByKey, freshCargoKeys)
   end
@@ -2083,6 +2087,80 @@ function M.dumpDiscards(config, discardEntries, keepId)
     elseif haveStorage then dropped = dropped + M.dumpToStorage(config, trashable, keepId) end
   end
   return dropped
+end
+
+-- Anti-hoarding sweep: void genuinely-redundant hybrids of species that ALREADY
+-- have a full purebred bank. Once M.isSpeciesBanked(species) holds, that species'
+-- hybrid DRONES only drift the bank and its IGNOBLE (bred, degrading;
+-- isNatural == false) hybrid princesses are dead weight -- both are trashed.
+-- NEVER touched: purebred bees (the banks), PRISTINE hybrid princesses
+-- (isNatural ~= false -- renewable stock AND fix-fodder for species not yet
+-- banked), and every bee of a not-yet-banked species (still that species' only
+-- seed). This is what the old (unwired) M.junkHybrids failed to do safely: it
+-- dumped ALL hybrid drones every cycle, trashing the fix-fodder needed to
+-- bootstrap a species' first purebred. Sweeps cargo AND the whole storage
+-- network, extracting storage targets into free cargo slots as it visits each
+-- store, then voids everything in ONE trash trip. Re-scans the census if it
+-- removed anything (the removed hybrids were counted in convertible/*). Returns
+-- the number voided. No-op without a trash location, or before anything is
+-- banked (nothing is redundant yet).
+function M.cullBankedHybrids(config)
+  if not config.trashPos then return 0 end -- nowhere to void -> keep everything
+  if not config._bankCensus then M.scanStorageCensus(config) end
+
+  local anyBanked = false
+  for sp in pairs(config._bankCensus or {}) do
+    if M.isSpeciesBanked(config, sp) then anyBanked = true; break end
+  end
+  if not anyBanked then return 0 end -- early game: no full bank yet, nothing redundant
+
+  local function cullEligible(stack)
+    local c = classifyBee(stack)
+    if not c or c.pure then return false end -- non-bee / purebred -> keep
+    if not M.isSpeciesBanked(config, c.species) then return false end -- fodder -> keep
+    if c.role == "drone" then return true end -- hybrid drone of a banked species
+    local ind = readIndividual(stack) -- hybrid princess: trash only IGNOBLE (bred) ones
+    return (ind and ind.isNatural == false) or false
+  end
+
+  local function firstFreeCargo()
+    for _, cs in ipairs(config.workingSlots) do
+      if cs ~= config.honeySlot and invCtrl().getStackInInternalSlot(cs) == nil then return cs end
+    end
+    return nil
+  end
+
+  -- Cargo targets first (identifiable without any travel).
+  local entries = {}
+  for _, cslot in ipairs(config.workingSlots) do
+    if cslot ~= config.honeySlot then
+      local stack = invCtrl().getStackInInternalSlot(cslot)
+      if stack and cullEligible(stack) then
+        entries[#entries + 1] = { drone = { id = "cull:c" .. cslot, _slot = cslot } }
+      end
+    end
+  end
+
+  -- Storage targets: extract into free cargo slots while standing at each store,
+  -- so the single trash trip below voids them together with the cargo ones. Stops
+  -- adding once cargo is full (no free slot) -- the rest get swept a later visit.
+  local down = sides().down
+  M.forEachStorageStack(config, function(_pos, slot, stack)
+    if cullEligible(stack) then
+      local dest = firstFreeCargo()
+      if dest then
+        agent().select(dest)
+        if (invCtrl().suckFromSlot(down, slot, stack.size or 1) or 0) > 0 then
+          entries[#entries + 1] = { drone = { id = "cull:s" .. slot, _slot = dest } }
+        end
+      end
+    end
+  end)
+
+  if #entries == 0 then return 0 end
+  local voided = M.dumpToTrash(config, entries)
+  if voided > 0 then M.scanStorageCensus(config) end -- census counted these; refresh it
+  return voided
 end
 
 -- ============================================================
