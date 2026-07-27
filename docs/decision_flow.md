@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.6.14** (2026-07-27).
+> Last verified against code: **v0.6.15** (2026-07-27).
 
 ---
 
@@ -174,7 +174,16 @@ proceeds (`gateSpecialConditions`).
 - **Incremental storage census** (`censusApplyStack`): the bank census is a cache,
   updated in place on every deposit/fetch (±size, slot bookkeeping) so the robot
   does **not** re-sweep all chests each visit. Self-heals via a periodic full
-  rescan (`censusRescanEvery`, default 12).
+  rescan (`censusRescanEvery`, default 12). Note the census tracks two things that
+  can drift: **counts** (`convertible`/`convertibleDrones`, in *bees*) drive the
+  scheduler's job choice, while the **slot index** (`slotsByKey`, in *slots*)
+  resolves the actual fetch.
+- **Fetch self-heal** (in `runGenebankSchedule`): if `fetchJobParents` misses (the
+  scheduler's count promised a parent the slot index can't supply — a stale
+  delta), the code does a full `scanStorageCensus` + index rebuild and retries the
+  fetch **once**. This stops a drifted count from idling a free apiary for a whole
+  cycle (the "only one pair fetched for two apiaries" symptom); if the parent
+  genuinely doesn't exist, it then blocks honestly on ground-truth data.
 - **Cull redundant hybrids** (`cullBankedHybrids`, throttled by `cullEveryVisits`):
   trash a hybrid **only** once **both** species it carries already have a
   self-sustaining pure set (a pure princess **and** a pure drone). Of those, trash

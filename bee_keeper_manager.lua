@@ -1783,7 +1783,25 @@ function M.runGenebankSchedule(config, site)
   end
 
   local fetched, why = fetchJobParents(config, job, slotsByKey)
-  if not fetched then return "fetch_failed:" .. job.type .. "(" .. tostring(why) .. ")" end
+  if not fetched then
+    -- The scheduler chose this job from census COUNTS (convertible/
+    -- convertibleDrones), but the fetch resolves each parent through the slot
+    -- INDEX (slotsByKey). Those two are maintained separately -- the counts by
+    -- the incremental censusApplyStack, the index rebuilt on rescans/offloads --
+    -- so a stale delta can leave a count saying "a W:Common carrier exists" while
+    -- the index has none. That drift hands an apiary a job it can't fill, and it
+    -- then sits IDLE for the whole cycle even though it's free and a sibling
+    -- apiary is breeding (the "only one pair fetched for two apiaries" symptom,
+    -- logged as fetch_failed:seedPrincess(no W:Common)). Before conceding, rebuild
+    -- both count and index from a ground-truth full rescan and retry once: if the
+    -- parent really is in storage the apiary now gets fed; if it genuinely isn't,
+    -- we block honestly on real data instead of idling on a stale number.
+    M.scanStorageCensus(config)
+    local _, _, healedCargoKeys = M.cargoCensus(config)
+    slotsByKey = M.mergeSlotsByKey(config._bankSlotsByKey, healedCargoKeys)
+    fetched, why = fetchJobParents(config, job, slotsByKey)
+    if not fetched then return "fetch_failed:" .. job.type .. "(" .. tostring(why) .. ")" end
+  end
   if not gotoSite(site) then return "nav_failed_to_apiary" end
   return executeJobAtApiary(config, site, job)
 end
