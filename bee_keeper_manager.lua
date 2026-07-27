@@ -1139,6 +1139,63 @@ function M.cargoCensus(config)
   return c.summary, c.convertible, c.slotsByKey, c.convertibleDrones
 end
 
+-- INCREMENTAL CENSUS: keep the cached storage census consistent with a SINGLE
+-- deposit or fetch, so a storage trip no longer has to re-sweep every store to
+-- refresh it. `size` units of `stack` were added to (removing=false) or removed
+-- from (removing=true) storage slot (loc, slot); nowEmpty says the slot is empty
+-- after a removal. Mirrors newCensus.add's bucketing exactly, so the running
+-- cache stays byte-identical to a fresh M.scanStorageCensus (asserted in
+-- bee_keeper_census_test.lua). No-op if the cache isn't seeded yet -- the first
+-- full scan builds it, and a periodic full re-scan self-heals any missed delta.
+function M.censusApplyStack(config, loc, slot, stack, size, removing, nowEmpty)
+  if not config._bankCensus then return end
+  local bee = classifyBee(stack)
+  if not bee or not size or size <= 0 then return end
+  config._bankConvertible = config._bankConvertible or {}
+  config._bankConvertibleDrones = config._bankConvertibleDrones or {}
+  config._bankSlotsByKey = config._bankSlotsByKey or {}
+  local d = removing and -size or size
+
+  local keys
+  if bee.role == "princess" and bee.pure then
+    local rec = config._bankCensus[bee.species] or { purePrincesses = 0, pureDrones = 0 }
+    rec.purePrincesses = math.max(0, rec.purePrincesses + d); config._bankCensus[bee.species] = rec
+    keys = { "P:" .. bee.species }
+  elseif bee.role == "drone" and bee.pure then
+    local rec = config._bankCensus[bee.species] or { purePrincesses = 0, pureDrones = 0 }
+    rec.pureDrones = math.max(0, rec.pureDrones + d); config._bankCensus[bee.species] = rec
+    keys = { "D:" .. bee.species }
+  elseif bee.role == "princess" then
+    keys = {}
+    for a in pairs(bee.alleles) do
+      config._bankConvertible[a] = math.max(0, (config._bankConvertible[a] or 0) + d)
+      keys[#keys + 1] = "V:" .. a
+    end
+  else
+    keys = {}
+    for a in pairs(bee.alleles) do
+      config._bankConvertibleDrones[a] = math.max(0, (config._bankConvertibleDrones[a] or 0) + d)
+      keys[#keys + 1] = "W:" .. a
+    end
+  end
+
+  -- Reconcile slotsByKey entries for this exact (loc, slot): add on deposit (if
+  -- not already present -- a merge into an existing stack keeps one entry), drop
+  -- on a removal that emptied the slot.
+  for _, key in ipairs(keys) do
+    local list = config._bankSlotsByKey[key]
+    if not list then list = {}; config._bankSlotsByKey[key] = list end
+    local found = false
+    for i = #list, 1, -1 do
+      if list[i].pos == loc and list[i].slot == slot then
+        found = true
+        if removing and nowEmpty then table.remove(list, i) end
+      end
+    end
+    if not removing and not found then list[#list + 1] = { pos = loc, slot = slot } end
+  end
+end
+
 -- Pure: sum two census summaries ({ [sp]={purePrincesses,pureDrones} }) into a
 -- new one. Used to give the scheduler the TOTAL available view (cached storage
 -- census + live cargo) without re-scanning storage.
@@ -1304,9 +1361,16 @@ local function fetchOne(config, entry, count)
   local pos = M.storagePositions(config)[entry.pos]
   if not pos then return false end
   if not Nav.gotoXZ(pos.x, pos.z) then return false end
+  local before = invCtrl().getStackInSlot(down, entry.slot) -- for the incremental census delta
   agent().select(free)
   local moved = invCtrl().suckFromSlot(down, entry.slot, count)
-  return moved and moved > 0
+  if moved and moved > 0 then
+    if before then
+      M.censusApplyStack(config, entry.pos, entry.slot, before, moved, true, moved >= (before.size or 1))
+    end
+    return true
+  end
+  return false
 end
 
 -- What a job needs as parents, in one place: the census-key + selection criteria
@@ -1622,7 +1686,14 @@ function M.runGenebankSchedule(config, site)
       local protect = jspec and { [jspec.pKey] = true, [jspec.dKey] = true } or nil
       M.offloadSurplus(config, protect)
     end
-    M.scanStorageCensus(config) -- refresh cache (+ _bankSlotsByKey) after any deposit
+    -- The census cache is kept current INCREMENTALLY by each deposit/fetch
+    -- (M.censusApplyStack), so we no longer re-sweep every store on each visit --
+    -- that full-store sweep was the "checks every single storage" cost. A periodic
+    -- full rescan still runs as a self-healing safety net for any missed delta.
+    config._censusTick = (config._censusTick or 0) + 1
+    if (config._censusTick % (config.censusRescanEvery or 12)) == 0 then
+      M.scanStorageCensus(config)
+    end
     -- Void redundant hybrids of already-banked species (cargo + storage) before
     -- rebuilding slotsByKey, so a trashed slot is never handed to fetchJobParents.
     -- Piggybacks on this storage visit we're already making; re-scans if it culled.
@@ -1847,7 +1918,7 @@ function M.depositBeesAcrossStores(config, entries)
   local positions = M.storagePositions(config)
   local down = sides().down
   local dropped, pending = 0, entries
-  for _, pos in ipairs(positions) do
+  for pi, pos in ipairs(positions) do
     if #pending == 0 then break end
     if Nav.gotoXZ(pos.x, pos.z) then
       local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
@@ -1859,8 +1930,14 @@ function M.depositBeesAcrossStores(config, entries)
         local slot = incoming and findStackingSlot(
           function(s) return invCtrl().getStackInSlot(down, s) end, candidateSlots, incoming)
         if slot then
+          local moved = incoming.size or 1
           agent().select(e._slot)
-          if invCtrl().dropIntoSlot(down, slot) then dropped = dropped + 1 else rest[#rest + 1] = e end
+          if invCtrl().dropIntoSlot(down, slot) then
+            dropped = dropped + 1
+            M.censusApplyStack(config, pi, slot, incoming, moved, false) -- keep cache current
+          else
+            rest[#rest + 1] = e
+          end
         else
           rest[#rest + 1] = e
         end
