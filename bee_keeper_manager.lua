@@ -1725,6 +1725,42 @@ function M.runGenebankSchedule(config, site)
 
   local state, plan = M.buildSchedulerState(config, site, summary, convertible, target, convertibleDrones)
   local job = Sched.nextJob(state)
+
+  -- TEMP DIAGNOSTIC (v0.6.16): the scheduler kept sacrificing pure Forest to
+  -- seedPrincess/fix a Common it already had pure stock of. If a pure Common is
+  -- truly in cargo yet these jobs still fire, the census is miscounting it. Dump
+  -- exactly what the scheduler saw for the job's species + the pure parent it's
+  -- about to spend, plus the RAW cargo bees of those species (active/inactive/
+  -- pure), so the next run shows whether the pure bee is being bucketed wrong.
+  if job.type == "seedPrincess" or job.type == "seedDrone" or job.type == "fix" or job.type == "grow" then
+    local watch = {}
+    local function mark(sp) if sp then watch[sp] = true end end
+    mark(job.species); mark(job.princess); mark(job.drone); mark(job.to); mark(target)
+    local parts = {}
+    for sp in pairs(watch) do
+      local s = summary[sp] or { purePrincesses = 0, pureDrones = 0 }
+      parts[#parts + 1] = string.format("%s{P=%d D=%d V=%d W=%d}", sp,
+        s.purePrincesses or 0, s.pureDrones or 0, convertible[sp] or 0, convertibleDrones[sp] or 0)
+    end
+    local cargoBees = {}
+    for _, cslot in ipairs(config.workingSlots) do
+      if cslot ~= config.honeySlot then
+        local st = invCtrl().getStackInInternalSlot(cslot)
+        local bee = classifyBee(st)
+        if bee and watch[bee.species] then
+          local ind = readIndividual(st)
+          cargoBees[#cargoBees + 1] = string.format("s%d:%s[%s/%s]%s%s x%d", cslot, bee.species,
+            ind and Cfg.speciesKey(ind.active.species) or "?",
+            ind and Cfg.speciesKey(ind.inactive.species) or "?",
+            bee.pure and "PURE" or "hyb", bee.role == "princess" and "P" or "D", bee.size or 1)
+        end
+      end
+    end
+    print(string.format("[sched-diag] %s job=%s | census: %s | cargo: %s",
+      site.name or "?", job.type, table.concat(parts, " "),
+      #cargoBees > 0 and table.concat(cargoBees, ", ") or "(none of these species)"))
+  end
+
   if job.type == "done" then
     -- Rainbow's target is always an UNBANKED species, so the scheduler only
     -- returns done for a single-target mutation site; rainbow re-picks next visit.
