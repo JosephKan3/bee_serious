@@ -231,6 +231,70 @@ local function isDroneStack(stack)
   return stack.name:lower():find("drone") ~= nil
 end
 
+-- Split isPrincessOrQueenStack's two cases apart. In Forestry an UNMATED
+-- princess is a "Princess" item; the moment she mates she becomes a distinct
+-- "Queen" item that then breeds and is consumed. The loaders need to tell
+-- these apart: a princess in slot 1 still WANTS a drone; a queen there is
+-- already breeding and must be left completely alone.
+local function isQueenStack(stack)
+  if not stack or not stack.name then return false end
+  return stack.name:lower():find("queen") ~= nil
+end
+local function isPrincessStack(stack)
+  if not stack or not stack.name then return false end
+  local l = stack.name:lower()
+  return l:find("princess") ~= nil and not l:find("queen")
+end
+
+-- Classify what's sitting in an apiary's queen(1)/drone(2) slots so the
+-- per-site loaders never drop a fresh drone (or clobber a queen) next to a
+-- bee that's already set up. PURE (takes the two raw stacks straight from
+-- getStackInSlot) so it's unit-testable off-hardware, and it reads the raw
+-- item NAME -- not the analyzed genome -- because a freshly mated queen is
+-- often still unanalyzed yet must still be recognized and protected.
+--   "empty"    slot 1 empty            -> free to seed a princess
+--   "unpaired" princess, drone slot empty -> the ONE state where we load a drone
+--   "paired"   princess + a drone already present -> cross is committed; do NOT
+--              re-pick a drone (that repeated re-swapping is the "random"
+--              re-breeding the user is seeing)
+--   "queen"    a MATED queen (or any unexpected slot-1 occupant) -> she is
+--              breeding regardless of what canWork() momentarily reports
+--              (output full, wrong climate/time can all read false); loading a
+--              drone here can't fertilize her, it only strands a drone in slot 2
+function M.classifyApiaryLoad(slot1, slot2)
+  if not slot1 then return "empty" end
+  if isQueenStack(slot1) then return "queen" end
+  -- Anything that reads as a princess -- by item name, OR simply by being an
+  -- analyzed bee that ISN'T a queen (slot 1 only ever holds a princess or a
+  -- queen) -- still needs (or already has) a drone.
+  if isPrincessStack(slot1) or (slot1.individual and slot1.individual.isAnalyzed) then
+    return isDroneStack(slot2) and "paired" or "unpaired"
+  end
+  -- A non-bee / unrecognized occupant: leave it be rather than clobber it.
+  return "queen"
+end
+
+-- Thin hardware wrapper: read the real apiary slots and classify them.
+function M.apiaryLoadState(down)
+  local ic = invCtrl()
+  return M.classifyApiaryLoad(ic.getStackInSlot(down, 1), ic.getStackInSlot(down, 2))
+end
+
+-- Shared guard for every site runner: once past the canWork()/harvest block,
+-- refuse to touch an apiary that already holds a breeding queen or a
+-- fully-loaded princess+drone pair. Returns a status string to bail with, or
+-- nil to proceed with seeding/loading. Placed AFTER reclaimLoneDrone so a
+-- genuinely lone drone (slot 1 empty) has already been pulled back first.
+function M.apiaryLoadGuard(down, site)
+  local state = M.apiaryLoadState(down)
+  if state == "queen" then
+    return "queen breeding at " .. (site.name or "?") .. " -- left untouched"
+  elseif state == "paired" then
+    return "pair already loaded at " .. (site.name or "?") .. " -- waiting to start"
+  end
+  return nil
+end
+
 -- Gathers usable candidate DRONES from the working slots (analyzed bees
 -- only -- unanalyzed ones are queued for analysis instead, see
 -- M.analyzeWorkingSlots). Explicitly excludes princess/queen items --
@@ -497,6 +561,14 @@ function M.runPerfectSite(config, site)
     M.analyzeWorkingSlots(config)
   end
 
+  -- Don't clobber a breeding queen or an already-loaded pair (see
+  -- M.apiaryLoadGuard). runPerfectSite otherwise swapQueens a fresh princess
+  -- in unconditionally, which on a canWork()==false read would replace a
+  -- mid-cycle queen or re-pick the drone next to a committed cross.
+  M.reclaimLoneDrone(config, site)
+  local guarded = M.apiaryLoadGuard(down, site)
+  if guarded then return guarded end
+
   local pool = gatherCombinePool(config, opts.traitOrder)
   if Combine.isDone(pool, opts) then
     -- A perfect bee is in cargo -- deposit to storage so the program's completion
@@ -632,6 +704,14 @@ function M.runQualitySite(config, site)
   -- Clear any drone stranded alone in slot 2 BEFORE seeding a princess below --
   -- otherwise she'd mate with the leftover drone instead of the one we pick.
   M.reclaimLoneDrone(config, site)
+
+  -- Never load a drone next to a bee that's already set up (see
+  -- M.apiaryLoadGuard): a mated queen mid-cycle stays untouched even if
+  -- canWork() momentarily reads false, and a princess already paired with a
+  -- drone keeps that committed cross instead of getting a freshly re-picked
+  -- (effectively random) drone every visit.
+  local guarded = M.apiaryLoadGuard(down, site)
+  if guarded then return guarded end
 
   local princessIndividual = M.readSideSlot(down, 1)
   local seededThisVisit = false
@@ -1750,6 +1830,14 @@ function M.runMutationSite(config, site)
     local sittingBee = toBreedingBee("princess", sittingPrincess, mutationTraits, site.targetSpecies)
     site.progress = M.purityOf(mutationTraits, sittingBee.genotype)
   end
+
+  -- Guard BEFORE any dispatch (genebank scheduler -> executeJobAtApiary, or
+  -- planMutationStep) -- both swapQueen+swapDrone unconditionally, so without
+  -- this a canWork()==false read on a still-breeding queen would have her
+  -- yanked out (swapQueen) and a new pair force-loaded mid-cycle. See
+  -- M.apiaryLoadGuard.
+  local guarded = M.apiaryLoadGuard(down, site)
+  if guarded then return guarded end
 
   -- Once the FINAL target shows up in a harvest, hand off -- the site is
   -- expected to switch to "species" mode to purify it from here (see the
