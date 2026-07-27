@@ -190,7 +190,15 @@ function M.renderBuffer(sites, dronePos, extras, statusInfo, chargePercent, widt
     -- on each visit (an apiary's contents can only be read while standing
     -- at it), so "--" means "not visited yet this run", not "0%".
     local pct = s.progress and string.format("%3.0f%%", s.progress * 100) or "  --"
-    panelLine(string.format(" %s %s %s", M.SYMBOLS[s.mode] or "?", pct, s.name or "?"))
+    -- modeLabel (stamped each cycle by bee_keeper_manager's dispatch) spells out
+    -- the CURRENT mode/phase -- e.g. a traitmax site shows "traitmax/acquire"
+    -- while it's climbing the mutation tree vs "traitmax/combine" once it's
+    -- purely quality-breeding -- so the dashboard never leaves you guessing why a
+    -- "traitmax" site is running mutation steps. Falls back to the static mode.
+    -- pct goes right after the symbol so a narrow panel truncates the (long)
+    -- modeLabel tail rather than eating the progress percent.
+    panelLine(string.format(" %s %4s %-6s %s",
+      M.SYMBOLS[s.mode] or "?", pct, s.name or "?", s.modeLabel or s.mode or "?"))
   end
   if #sites == 0 then panelLine(" (none)") end
 

@@ -567,6 +567,31 @@ function M.runPerfectSite(config, site)
     site.targetSpecies, working, #opts.traitOrder, bestPs, bestDs)
 end
 
+-- Reclaim a drone stranded ALONE in an apiary's drone slot (slot 2). Forestry
+-- consumes the drone when a princess becomes a queen, but live runs show drones
+-- persisting in slot 2 with NO princess in slot 1 -- and M.harvestSite only pulls
+-- the product slots (3+), while nothing anywhere else ever reads or clears slot 2.
+-- A lone drone there can't mate (a wasted apiary cycle) and, worse, would mate
+-- with the NEXT princess seeded into slot 1 before the intended drone is loaded
+-- (a wrong cross). So whenever slot 1 is empty, pull any slot-2 drone back into
+-- cargo, where it becomes a normal candidate again. No-op if slot 1 is occupied,
+-- slot 2 is already empty, or cargo has no free slot to receive it.
+function M.reclaimLoneDrone(config, site)
+  local down = sides().down
+  if invCtrl().getStackInSlot(down, 1) ~= nil then return false end -- princess/queen present
+  if invCtrl().getStackInSlot(down, 2) == nil then return false end -- drone slot already clear
+  local dest = nil
+  for _, slot in ipairs(config.workingSlots) do
+    if slot ~= config.honeySlot and invCtrl().getStackInInternalSlot(slot) == nil then
+      dest = slot; break
+    end
+  end
+  if not dest then return false end -- cargo full: leave it rather than lose it
+  Status.setStep("Reclaiming stranded drone at " .. (site.name or "?"))
+  agent().select(dest)
+  return beekeeper().swapDrone(down) and true or false
+end
+
 -- Runs one decision+action cycle for a "traitmax" or "species" site.
 -- Returns a short status string for logging.
 function M.runQualitySite(config, site)
@@ -603,6 +628,10 @@ function M.runQualitySite(config, site)
     M.harvestSite(config, site)
     M.analyzeWorkingSlots(config)
   end
+
+  -- Clear any drone stranded alone in slot 2 BEFORE seeding a princess below --
+  -- otherwise she'd mate with the leftover drone instead of the one we pick.
+  M.reclaimLoneDrone(config, site)
 
   local princessIndividual = M.readSideSlot(down, 1)
   local seededThisVisit = false
@@ -1584,6 +1613,10 @@ function M.runMutationSite(config, site)
     M.harvestSite(config, site)
     M.analyzeWorkingSlots(config)
   end
+
+  -- Clear any drone left stranded alone in slot 2 (see M.reclaimLoneDrone) so the
+  -- site isn't left holding a lone drone with no princess between attempts.
+  M.reclaimLoneDrone(config, site)
 
   -- Same last-known purity cache as runQualitySite (see the note there).
   -- A mutation site is often empty between attempts, in which case there
@@ -2687,15 +2720,20 @@ function M.runCycle(config)
       -- max bee (species-agnostic). Without templates/graph/genebank, traitmax
       -- is just plain quality breeding, exactly as before.
       if M.traitmaxAcquiring(config, site) then
+        site.modeLabel = "traitmax/acquire" -- Phase A: breeding up the mutation tree for donor alleles
         status = M.runMutationSite(config, site)
       else
+        site.modeLabel = "traitmax/combine" -- Phase B: concentrating good alleles into one max bee
         status = M.runQualitySite(config, site)
       end
     elseif site.mode == "species" then
+      site.modeLabel = "species"
       status = M.runQualitySite(config, site)
     elseif site.mode == "perfect" then
+      site.modeLabel = "perfect"
       status = M.runPerfectSite(config, site)
     elseif site.mode == "mutation" or site.mode == "rainbow" then
+      site.modeLabel = site.mode
       status = M.runMutationSite(config, site)
     else
       status = "unknown_mode:" .. tostring(site.mode)
