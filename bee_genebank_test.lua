@@ -80,26 +80,21 @@ do
 end
 
 -- ============================================================
--- canSpendPrincess -- may draw to zero, but only if the drone reservoir is intact
+-- canSpendPrincess -- SURPLUS-ONLY: spendable only ABOVE the reserve (minPrincesses),
+-- mirroring canSpendDrone. The reserve princess is inviolable capital.
 -- ============================================================
 
 do
-  local ready = GB.summarize(entriesFor("Forest", 1, 0, 8, 0))
-  check("canSpendPrincess TRUE with 1 pure princess AND full drone reservoir",
-    GB.canSpendPrincess(ready, "Forest"))
+  local surplus = GB.summarize(entriesFor("Forest", 2, 0, 8, 0))
+  check("canSpendPrincess TRUE with a SURPLUS princess (2 > reserve 1)",
+    GB.canSpendPrincess(surplus, "Forest"))
 
-  -- Recovery floor (default 2), NOT the full reserve: a freshly-bred
-  -- intermediate with a princess + a couple drones can already be used.
-  local recoverable = GB.summarize(entriesFor("Forest", 1, 0, 2, 0))
-  check("canSpendPrincess TRUE at the recovery floor (2 pure drones, < the 8 reserve)",
-    GB.canSpendPrincess(recoverable, "Forest"))
+  local atReserve = GB.summarize(entriesFor("Forest", 1, 0, 8, 0))
+  check("canSpendPrincess FALSE at the reserve (1 princess) -- reserve is inviolable",
+    not GB.canSpendPrincess(atReserve, "Forest"))
 
-  local belowRecovery = GB.summarize(entriesFor("Forest", 1, 0, 1, 0))
-  check("canSpendPrincess FALSE below the recovery floor (1 < 2) -- can't re-purify",
-    not GB.canSpendPrincess(belowRecovery, "Forest"))
-
-  check("canSpendPrincess respects a custom recoveryDrones",
-    not GB.canSpendPrincess(recoverable, "Forest", { recoveryDrones = 3 }))
+  check("canSpendPrincess respects a custom minPrincesses (2 not > reserve 2)",
+    not GB.canSpendPrincess(surplus, "Forest", { minPrincesses = 2 }))
 
   local noPrincess = GB.summarize(entriesFor("Forest", 0, 2, 10, 0))
   check("canSpendPrincess FALSE with no pure princess to spend",
@@ -144,43 +139,43 @@ end
 -- ============================================================
 
 do
-  -- Both parents secure and drawable.
+  -- Both parents have SURPLUS in the role they're spent in -> ready.
   local e = {}
-  for _, x in ipairs(entriesFor("Forest", 1, 0, 8, 0)) do table.insert(e, x) end   -- princess parent
-  for _, x in ipairs(entriesFor("Wintry", 1, 0, 9, 0)) do table.insert(e, x) end   -- drone parent (surplus)
+  for _, x in ipairs(entriesFor("Forest", 2, 0, 8, 0)) do table.insert(e, x) end   -- princess surplus (2>1)
+  for _, x in ipairs(entriesFor("Wintry", 1, 0, 9, 0)) do table.insert(e, x) end   -- drone surplus (9>8)
   local s = GB.summarize(e)
   local plan = GB.planStepDraw(s, "Forest", "Wintry")
-  check("planStepDraw ready when princess-parent recoverable and drone-parent has surplus",
+  check("planStepDraw ready when both parents have surplus",
     plan.ready and #plan.replenish == 0 and #plan.unrecoverable == 0)
 end
 
 do
-  -- Drone parent at floor (no surplus) -> must replenish it first.
+  -- Drone parent at reserve (no surplus) -> must replenish it first (recoverable).
   local e = {}
-  for _, x in ipairs(entriesFor("Forest", 1, 0, 8, 0)) do table.insert(e, x) end
-  for _, x in ipairs(entriesFor("Wintry", 1, 0, 8, 0)) do table.insert(e, x) end
+  for _, x in ipairs(entriesFor("Forest", 2, 0, 8, 0)) do table.insert(e, x) end
+  for _, x in ipairs(entriesFor("Wintry", 1, 0, 8, 0)) do table.insert(e, x) end   -- at reserve, no surplus
   local s = GB.summarize(e)
   local plan = GB.planStepDraw(s, "Forest", "Wintry")
-  check("planStepDraw not ready when drone parent is only at the floor", not plan.ready)
+  check("planStepDraw not ready when drone parent has no surplus", not plan.ready)
   check("planStepDraw asks to replenish the drone parent (Wintry)",
     plan.replenish[1] == "Wintry" and #plan.unrecoverable == 0)
 end
 
 do
-  -- Princess parent below the RECOVERY floor (1 pure drone < 2) but recoverable
-  -- (has that 1 pure drone to purify toward) -> replenish it first.
+  -- Princess parent at reserve (1 = minP, no surplus) but recoverable (a pure drone to
+  -- purify toward) -> replenish it first, never spend the reserve.
   local e = {}
-  for _, x in ipairs(entriesFor("Forest", 1, 0, 1, 0)) do table.insert(e, x) end   -- below recovery
+  for _, x in ipairs(entriesFor("Forest", 1, 0, 8, 0)) do table.insert(e, x) end   -- at reserve
   for _, x in ipairs(entriesFor("Wintry", 1, 0, 9, 0)) do table.insert(e, x) end
   local s = GB.summarize(e)
   local plan = GB.planStepDraw(s, "Forest", "Wintry")
-  check("planStepDraw asks to replenish the princess parent when below the recovery floor",
+  check("planStepDraw asks to replenish the princess parent when at reserve (no surplus)",
     not plan.ready and plan.replenish[1] == "Forest")
 end
 
 do
   -- Drone parent entirely absent and unrecoverable (no princess, no pure drone).
-  local s = GB.summarize(entriesFor("Forest", 1, 0, 9, 0))
+  local s = GB.summarize(entriesFor("Forest", 2, 0, 9, 0))
   local plan = GB.planStepDraw(s, "Forest", "Meadows")
   check("planStepDraw flags a missing base parent as unrecoverable",
     not plan.ready and plan.unrecoverable[1] == "Meadows" and #plan.replenish == 0)

@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.6.17** (2026-07-27).
+> Last verified against code: **v0.7.0** (2026-07-27).
 
 ---
 
@@ -142,34 +142,45 @@ its own configured mode.
 
 ### Genebank scheduler jobs (acquire / rainbow)
 
-The scheduler builds each species' purebred bank bottom-up and only spends a bank
-once it's stocked. Job types: `mutate`, `grow`, `growDrone`, `convert`, `fix`,
-`seedDrone`, `seedPrincess`, `done`, `blocked`. `executeJobAtApiary` picks parents
-**greedily and fertility-aware** — the princess closest to the pure target, then
-the drone that best complements her, species weighted high so consolidation never
-trades species purity for a stat.
+Job types: `mutate`, `grow`, `growDrone`, `convert`, `fix`, `seedDrone`,
+`seedPrincess`, `done`, `blocked`. `executeJobAtApiary` picks parents **greedily and
+fertility-aware** — the princess closest to the pure target, then the drone that best
+complements her, species weighted high so consolidation never trades species purity
+for a stat.
 
-**Bootstrapping a species' DRONE bank** (X needs pure drones, has none yet) follows
-this preference order, cheapest/least-wasteful first:
-1. `grow` — pure X princess × pure X drone (once ≥1 pure drone exists).
-2. `fix` — carrier princess (V:X) × carrier drone (W:X) → ~25% pure. Preferred when
-   both carrier roles exist because it spends carriers and **preserves** the pure
-   princess.
-3. `growDrone` — pure X princess × carrier drone (W:X) → ~50% pure X drones. Used
-   when `fix` is impossible (no carrier princess) **but a pure X princess is already
-   held**. This replaced a real bug where the scheduler instead ran `seedPrincess`
-   (pure *Forest* × carrier), sacrificing a foreign purebred to manufacture a
-   carrier princess while ignoring the pure X princess sitting in cargo. `growDrone`
-   seeds the drone bank from a bee already held and wastes nothing; the offspring
-   princess is also ~50% pure X, so the princess line is largely conserved.
-4. `seedPrincess` / `seedDrone` — last resort: spread X into the missing carrier
-   role from a pure *parent-species* bee, only when no pure X princess is available
-   to `growDrone` from.
+#### THE RESERVE INVARIANT (the bank is capital — spend only surplus)
+
+Each species keeps an **inviolable bank**: `minPrincesses` pure princesses (default 1)
++ `minDrones` pure drones (default 8). **Banked purebreds are never consumed to climb
+the tree.** A species is stocked to its reserve **plus one surplus unit in each role
+it is spent in** (a *princess parent* → `minP+1` princesses; a *drone parent* →
+`minD+1` drones); only that **surplus** is ever spent in a cross. Build order per
+species: **princess reserve → drones (reserve + surplus) → princess surplus** — drones
+first because surplus drones are what a surplus princess is purified against.
+
+Consequences:
+- The **only** job allowed to use reserve bees is `grow` (pure × pure) — it conserves
+  the princess (pure offspring replaces her) and nets drones. This is the sanctioned
+  "breed the bank together" that mints surplus.
+- Cross-species spends (`mutate`, `seedPrincess`, `seedDrone`) take **only** a foreign
+  parent's surplus; `growDrone` (pure princess × carrier drone) fires **only** from a
+  surplus princess. A parent at its reserve is *built up first*, never drained.
+- Topological order sequences it: a parent (earlier step / base Phase 1) reaches its
+  surplus before the child (later step) spends it.
+- Bases need **renewable surplus**: a base at reserve with no byproduct carrier to
+  convert `blocked`s + beeps for a pristine restock rather than eating its reserve.
+
+This replaced a real bug (`[sched-diag]` logs) where the scheduler spent a species at
+a thin `recoveryDrones` floor — draining a pure Common princess to zero and sacrificing
+pure **Forest** to rebuild it — instead of growing the Common pair it was holding.
+`recoveryDrones` is retired. Reserve enforcement is a pure `bee_genebank.lua` concern
+(`canSpendDrone` / `canSpendPrincess`, both surplus-only), and the never-deplete-reserve
+invariant is covered by `bee_genebank_scheduler_test.lua`.
 
 **Key genetics reality (GTNH/Forestry):** mutations yield **hybrids**, not pure
-offspring. A pure species is bootstrapped from two carriers (the `fix` job) at
-roughly a 25% pure yield — so the scheduler churns `seedPrincess`/`seedDrone`/`fix`
-until a pure pair appears. This is the dominant source of real storage round-trips.
+offspring. The first pure of a species is bootstrapped from two carriers (`fix`, ~25%
+pure); `grow`/`convert` then build the bank, and only surplus climbs. Slower than the
+old aggressive spend, but it never throws a purebred away.
 
 ### Special-condition gate (mutation)
 

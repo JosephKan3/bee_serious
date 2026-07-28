@@ -66,21 +66,70 @@ function M.nextJob(state)
   local target = state.target
   local minP = state.minPrincesses or 1
   local minD = state.minDrones or 8
-  local recovery = state.recoveryDrones or 2
 
   -- Reached the goal: one pure princess of the target is enough.
   if bankOf(banks, target).purePrincesses >= 1 then return { type = "done" } end
 
-  -- Which species are used as a DRONE parent -- only those need the full minDrones
-  -- reserve. A species used only as a princess parent (or a leaf that's just a
-  -- princess source) needs only a small `recovery` drone stock (enough to convert
-  -- byproducts back to it). This stops the scheduler over-building drone banks it
-  -- never spends, which is what slowed deep trees down.
-  local droneParents = {}
-  for _, step in ipairs(steps) do droneParents[step.drone] = true end
-  local function targetFor(species)
-    if species == target then return 1, 0 end
-    return minP, (droneParents[species] and minD or recovery)
+  -- Which role each species is SPENT in up-tree (a princess parent of some step, a
+  -- drone parent of some step, or both). A species is built ONE surplus unit above
+  -- reserve in each role it is spent in, so the spend draws only that surplus and the
+  -- reserve is never breached.
+  local princessParent, droneParent = {}, {}
+  for _, step in ipairs(steps) do
+    princessParent[step.princess] = true
+    droneParent[step.drone] = true
+  end
+
+  -- BUILD TARGET (how full to stock a species). The TARGET only needs to be REACHED
+  -- (1 pure princess, no drone bank -- it is the endpoint, never spent onward). Every
+  -- other species keeps its full reserve (minP princesses + minD drones) PLUS one
+  -- surplus unit in each role it is spent in.
+  local function buildTarget(sp)
+    if sp == target then return 1, 0 end
+    return minP + (princessParent[sp] and 1 or 0), minD + (droneParent[sp] and 1 or 0)
+  end
+
+  -- SPEND FLOOR: the inviolable reserve. A pure princess / drone of sp may be spent as
+  -- a FOREIGN parent (or, for the princess, destructively via growDrone) only from
+  -- SURPLUS strictly above minP / minD -- never down into the reserve.
+  local function princessSurplus(sp) return bankOf(banks, sp).purePrincesses > minP end
+  local function droneSurplus(sp) return bankOf(banks, sp).pureDrones > minD end
+
+  local function nV(sp) return (convertible[sp] or 0) >= 1 end        -- carrier PRINCESS of sp
+  local function nW(sp) return (convertibleDrones[sp] or 0) >= 1 end  -- carrier DRONE of sp
+
+  -- One job that raises X's pure PRINCESS count. Consolidate X's OWN carriers first
+  -- (fix / convert -- no foreign spend); introduce a missing carrier role from a
+  -- FOREIGN parent's SURPLUS (seed); create the first carriers by mutating A x B from
+  -- surplus. nil if nothing on hand can advance it (a parent still needs building).
+  local function buildPrincessJob(X, A, B)
+    local h = bankOf(banks, X)
+    local haveV, haveW = nV(X), nW(X)
+    if h.purePrincesses < 1 and haveV and haveW then return { type = "fix", species = X } end
+    if haveV and h.pureDrones >= 1 then return { type = "convert", to = X } end
+    if haveW and not haveV and princessSurplus(A) then return { type = "seedPrincess", species = X, princess = A } end
+    if haveV and not haveW and droneSurplus(B) then return { type = "seedDrone", species = X, drone = B } end
+    if not haveV and not haveW and princessSurplus(A) and droneSurplus(B) then
+      return { type = "mutate", princess = A, drone = B, result = X }
+    end
+    return nil
+  end
+
+  -- One job that raises X's pure DRONE count. grow the pair; else bootstrap from
+  -- carriers (fix); else -- only from a SURPLUS princess -- growDrone; else seed the
+  -- missing carrier role from a foreign surplus parent so fix can run; else mutate.
+  local function buildDroneJob(X, A, B)
+    local h = bankOf(banks, X)
+    local haveV, haveW = nV(X), nW(X)
+    if h.purePrincesses >= 1 and h.pureDrones >= 1 then return { type = "grow", species = X } end
+    if haveV and haveW then return { type = "fix", species = X } end
+    if haveW and princessSurplus(X) then return { type = "growDrone", species = X } end
+    if haveV and not haveW and droneSurplus(B) then return { type = "seedDrone", species = X, drone = B } end
+    if haveW and not haveV and princessSurplus(A) then return { type = "seedPrincess", species = X, princess = A } end
+    if not haveV and not haveW and princessSurplus(A) and droneSurplus(B) then
+      return { type = "mutate", princess = A, drone = B, result = X }
+    end
+    return nil
   end
 
   -- Which base species the tree actually uses (as a parent of some step).
@@ -90,122 +139,56 @@ function M.nextJob(state)
     if base[step.drone] then usedBase[step.drone] = true end
   end
 
-  -- Phase 1 -- base banks first (deterministic order). A base species short of
-  -- princesses is renewed by converting a byproduct (its pool is conserved); short
-  -- of drones, grown pure x pure. If it can't be renewed at all, we're blocked.
+  -- Phase 1 -- base banks (deterministic order). The hard PRINCESS reserve comes
+  -- first (losing it loses the base): renew from a byproduct carrier, else block for a
+  -- pristine restock. Then grow the drone bank toward its build target. A base's
+  -- princess SURPLUS is only buildable by converting a byproduct carrier against a
+  -- surplus drone; if no carrier exists yet it's left for later (byproducts supply it
+  -- as the tree runs, or the user restocks) rather than blocking.
   for _, b in ipairs(sortedKeys(usedBase)) do
     local have = bankOf(banks, b)
-    local tp, td = targetFor(b)
-    if have.purePrincesses < tp then
-      if (convertible[b] or 0) >= 1 and have.pureDrones >= 1 then
-        return { type = "convert", to = b }
-      end
+    local bp, bd = buildTarget(b)
+    if have.purePrincesses < minP then
+      if nV(b) and have.pureDrones >= 1 then return { type = "convert", to = b } end
       return { type = "blocked", need = "pristine princess of '" .. b .. "'" }
     end
-    if have.pureDrones < td then
+    if have.pureDrones < bd and have.pureDrones >= 1 then
       return { type = "grow", species = b }
+    end
+    if have.purePrincesses < bp and nV(b) and droneSurplus(b) then
+      return { type = "convert", to = b }
     end
   end
 
-  -- Phase 2 -- intermediates then target, in topological order. The first species
-  -- whose bank isn't at target decides the job; because parents come earlier in
-  -- the order, a short parent is handled before the child that needs it.
+  -- Phase 2 -- intermediates then target, in topological order. Parents come earlier,
+  -- so a parent that lacks the SURPLUS to be spent is built up before the child that
+  -- needs it. Reserves are never drawn down: every cross-species spend (mutate / seed)
+  -- takes only a parent's SURPLUS, while a species' OWN bank is built with fix /
+  -- convert / grow (and, only from a surplus princess, growDrone). A mutation yields
+  -- HYBRIDS (carriers of X), never a pure X; the first pure X comes from fix (carrier
+  -- V:X x carrier W:X ~25% pure), so carriers are consolidated before re-mutating.
   for _, step in ipairs(steps) do
     local X, A, B = step.result, step.princess, step.drone
     local have = bankOf(banks, X)
-    local tp, td = targetFor(X)
-    local aHasPrincess = bankOf(banks, A).purePrincesses >= 1
-    local bHasDrone = bankOf(banks, B).pureDrones >= 1
+    local rp = (X == target) and 1 or minP           -- hard princess RESERVE
+    local sp, sd = buildTarget(X)                     -- reserve + surplus (spent role)
 
-    -- A mutation yields only HYBRIDS -- carriers of X, never a pure X. The ONLY
-    -- way to get the first pure X is to breed a carrier PRINCESS x carrier DRONE
-    -- of X together (~25% pure). So whenever X still lacks pure stock but carriers
-    -- of BOTH roles exist, consolidate them first -- otherwise the scheduler would
-    -- mutate forever, banking hybrid after hybrid and never bootstrapping a pure
-    -- (the real-hardware dead-end this fixes). fix also seeds the first pure DRONES
-    -- (offspring drones are ~25% pure too), which then let `grow` build the bank.
-    local haveV = (convertible[X] or 0) >= 1        -- carrier PRINCESS of X exists
-    local haveW = (convertibleDrones[X] or 0) >= 1  -- carrier DRONE of X exists
-    local canFix = haveV and haveW
-
-    if have.purePrincesses < tp then
-      if have.purePrincesses < 1 and canFix then
-        return { type = "fix", species = X }
-      end
-      -- We have a carrier PRINCESS of X and already hold pure X DRONES (e.g. X's
-      -- princess line was just spent while its drone bank stands). Don't re-mutate:
-      -- cross the carrier against our own pure X drones (carrier x pure -> ~50%
-      -- pure) to restore the pure princess directly. `convert to=X` is exactly
-      -- V:X x D:X. This is the cheap, reliable renewal that keeps a line alive.
-      if haveV and have.pureDrones >= 1 then
-        return { type = "convert", to = X }
-      end
-      -- Only ONE carrier role of X exists and there's no pure X to breed against
-      -- yet (the usual state right after a mutation fires: a carrier princess, but
-      -- the sibling drones didn't roll X). Don't re-roll the low-chance MUTATION
-      -- hoping the other role drops -- that's the churn that stalls deep trees.
-      -- Species inherits like any allele: breed the carrier we HAVE against a PURE
-      -- PARENT (carrier x pure -> ~50% carriers) to spread X into the missing role,
-      -- then `fix` consolidates. Reliable, and it never burns a mutation attempt.
-      if have.purePrincesses < 1 then
-        if haveV and not haveW and bHasDrone then
-          -- carrier princess (V:X) x pure parent drone -> ~50% carrier DRONES.
-          return { type = "seedDrone", species = X, drone = B }
-        end
-        if haveW and not haveV and aHasPrincess then
-          -- pure parent princess x carrier drone (W:X) -> ~50% carrier PRINCESSES.
-          return { type = "seedPrincess", species = X, princess = A }
-        end
-      end
-      -- No carrier of X on hand at all -> mutate to acquire the first one, if the
-      -- parents can supply a princess of A and a drone of B right now.
-      if aHasPrincess and bHasDrone then
-        return { type = "mutate", princess = A, drone = B, result = X }
-      end
-      -- Parent A is short a princess (likely just spent) -> renew A by converting
-      -- a byproduct back to it, so the mutation can run next.
-      if not aHasPrincess and (convertible[A] or 0) >= 1 and bankOf(banks, A).pureDrones >= 1 then
-        return { type = "convert", to = A }
-      end
-      -- Otherwise a parent isn't ready yet; an earlier step/base handles it. If
-      -- nothing earlier claimed a job we fall through to "blocked" below.
-    elseif X ~= target and have.pureDrones < td then
-      -- Grow X's drone bank BEFORE it's spent as a parent upstream.
-      if have.pureDrones >= 1 then
-        return { type = "grow", species = X }
-      end
-      -- No pure X drone yet: consolidate carriers to seed the first pure drones.
-      -- Preferred when BOTH carrier roles exist because it preserves the pure X
-      -- princess (fix spends carriers, not her).
-      if canFix then
-        return { type = "fix", species = X }
-      end
-      -- fix isn't possible (only ONE carrier role), BUT we hold a pure X PRINCESS
-      -- and a carrier X DRONE (W:X): breed her x the carrier -> ~50% pure X drones
-      -- directly (mom is pure X, so each offspring drone gets X from her and
-      -- X-or-other from the carrier). This is the key win over the seedPrincess
-      -- fallback below -- it seeds the drone bank from a bee we already hold
-      -- instead of sacrificing a FOREIGN pure parent (the pure-Forest-thrown-away
-      -- waste). Her offspring princess is also ~50% pure X, so the princess line is
-      -- largely conserved, not spent.
-      if haveW and have.purePrincesses >= 1 then
-        return { type = "growDrone", species = X }
-      end
-      -- Only one carrier role and no pure X princess to seed drones from -> spread
-      -- X into the missing role from pure parents (same rationale as above), so
-      -- `fix` can then seed the pure drones.
-      if haveV and not haveW and bHasDrone then
-        return { type = "seedDrone", species = X, drone = B }
-      end
-      if haveW and not haveV and aHasPrincess then
-        return { type = "seedPrincess", species = X, princess = A }
-      end
-      -- Have an X princess but no X drone yet -> mutate more X to seed drones.
-      if aHasPrincess and bHasDrone then
-        return { type = "mutate", princess = A, drone = B, result = X }
-      end
+    -- Tiers, in order: (1) reach the hard PRINCESS reserve; (2) build DRONES to
+    -- reserve+surplus -- drones come before princess surplus because surplus drones are
+    -- what a princess surplus is purified against; (3) build the PRINCESS surplus X owes
+    -- as a princess parent. A cross-species spend inside these only ever takes a
+    -- FOREIGN parent's surplus (never its reserve); if a parent lacks surplus, fall
+    -- through -- an earlier step (or base Phase 1) builds it first, in topological order.
+    local job
+    if have.purePrincesses < rp then
+      job = buildPrincessJob(X, A, B)
+    elseif X ~= target and have.pureDrones < sd then
+      job = buildDroneJob(X, A, B)
+    elseif have.purePrincesses < sp then
+      job = buildPrincessJob(X, A, B)
     end
-    -- X's bank is at target -> continue up the tree.
+    if job then return job end
+    -- X's bank is at target (or nothing here advances it) -> continue up the tree.
   end
 
   -- Every bank looks satisfied yet the target isn't reached -- shouldn't happen

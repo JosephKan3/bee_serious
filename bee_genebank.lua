@@ -7,20 +7,21 @@
   heterozygous offspring, so a continuously-consumed base line degrades and is
   eventually lost; see the Cultivated stall in fast_debug / v0.3 design memo).
 
-  THE RESERVE (per species): keep >= 1 purebred (species-homozygous) PRINCESS
-  and >= N purebred DRONES (N default 8). The drones are the recovery
-  reservoir: a mutation cross A x B necessarily consumes A's princess and
-  leaves a heterozygous replacement, so A's pure line can only be REBUILT by
-  re-purifying that replacement against pure A drones (ordinary species-mode
-  breeding). Hence the asymmetry below:
+  THE RESERVE (per species): keep >= minPrincesses purebred (species-homozygous)
+  PRINCESSES and >= minDrones purebred DRONES (defaults 1 and 8). The reserve is
+  INVIOLABLE CAPITAL -- it is never consumed to climb the mutation tree. The only
+  thing done with the bank is breeding it TOGETHER (pure x pure `grow`) to mint
+  surplus; the climb spends only that surplus. Hence, symmetrically:
 
-    - A DRONE is only ever spent from SURPLUS (pureDrones > minDrones) -- the
-      reservoir itself is never touched, or there'd be nothing to recover with.
-    - A PRINCESS may be spent down to zero (a mutation has to consume it), but
-      ONLY when the drone reservoir is intact (>= minDrones), because that's
-      what guarantees the species can be re-purified afterward. If the reservoir
-      isn't there, the species must be replenished BEFORE it's used as a
-      princess parent, or using it risks losing it for good.
+    - A DRONE is spent only from SURPLUS (pureDrones > minDrones).
+    - A PRINCESS is spent only from SURPLUS (purePrincesses > minPrincesses).
+
+  A cross A x B that would take A's princess (or B's drone) below its reserve is
+  NOT permitted; the species must be built up to a surplus FIRST (grow for drones,
+  convert a carrier for princesses). This is stricter than a former "spend the
+  princess to zero while a drone reservoir remains" rule -- that relaxation is what
+  sacrificed banked purebreds (see docs/decision_flow.md). recoveryDrones is retained
+  only for backward compat and is no longer consulted.
 
   This module makes those decisions over a plain snapshot of holdings; it knows
   nothing about genomes, inventories, or storage. The caller (manager) classifies
@@ -134,14 +135,15 @@ function M.canSpendDrone(summary, species, opts)
 end
 
 -- May a pure PRINCESS of this species be spent (as a mutation's allele1 parent)
--- right now? Allowed to draw the line down to zero, but ONLY while there are
--- enough pure drones to re-purify the drifted replacement afterward
--- (>= recoveryDrones). That recovery capacity is what prevents permanent loss;
--- it is intentionally the SMALL floor, not the full maintenance reserve, so a
--- freshly-bred intermediate can be used as soon as it can be recovered.
+-- right now? SURPLUS-ONLY, mirroring canSpendDrone: only when the species holds
+-- MORE than its reserve (> minPrincesses). The banked reserve princess is never
+-- consumed to climb the tree -- it is inviolable capital, bred only pure x pure
+-- (`grow`) to make surplus; the climb spends the surplus, never the reserve.
+-- (Supersedes the old "draw down to zero while recoveryDrones intact" rule, which
+-- let a species' only pure princess be sacrificed and re-purified -- the churn that
+-- threw away banked purebreds. recoveryDrones is now unused.)
 function M.canSpendPrincess(summary, species, opts)
-  local s = M.statusOf(summary, species)
-  return s.purePrincesses >= 1 and s.pureDrones >= M.recoveryDrones(opts)
+  return M.statusOf(summary, species).purePrincesses > M.minPrincesses(opts)
 end
 
 -- How far below the reserve floor a species sits (0/0 when secure). Drives the
