@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.7.3** (2026-07-28).
+> Last verified against code: **v0.7.4** (2026-07-28).
 
 ---
 
@@ -161,7 +161,11 @@ first because surplus drones are what a surplus princess is purified against.
 Consequences:
 - The **only** job allowed to use reserve bees is `grow` (pure × pure) — it conserves
   the princess (pure offspring replaces her) and nets drones. This is the sanctioned
-  "breed the bank together" that mints surplus.
+  "breed the bank together" that mints surplus. **Stacking nudge (v0.7.4):** `grow`/
+  `growDrone` prefer a drone whose genome is *identical* to the chosen princess, so
+  offspring are one genome and the drone bank converges toward a single stackable slot
+  (a ~2-slot bank) instead of sprawling across near-duplicates. Full 2-slot stacking is
+  only reached once the bank is homozygous-identical (i.e. after traitmax).
 - Cross-species spends (`seedPrincess`, `seedDrone`) take **only** a foreign parent's
   surplus; `growDrone` (pure princess × carrier drone) fires **only** from a surplus
   princess. A parent at its reserve is *built up first*, never drained.

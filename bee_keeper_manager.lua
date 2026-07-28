@@ -1589,6 +1589,23 @@ local function jobTargetSpecies(job)
   return job.species or job.to or job.result
 end
 
+-- Do two raw bee genomes match on EVERY trait (both active and inactive)? Used to
+-- keep the bank STACKABLE: `grow` prefers a drone genome-identical to the princess so
+-- offspring are one genome (drones stack into a single slot) instead of drifting into
+-- many near-duplicate slots. Species is a nested table -> compared by name/uid.
+local function alleleEqual(x, y)
+  if type(x) == "table" and type(y) == "table" then return x.name == y.name and x.uid == y.uid end
+  return x == y
+end
+local function individualGenomeEqual(traitList, i1, i2)
+  if not (i1 and i2 and i1.active and i2.active and i1.inactive and i2.inactive) then return false end
+  for _, t in ipairs(traitList) do
+    if not alleleEqual(i1.active[t], i2.active[t]) then return false end
+    if not alleleEqual(i1.inactive[t], i2.inactive[t]) then return false end
+  end
+  return true
+end
+
 local function executeJobAtApiary(config, site, job)
   local down = sides().down
   local spec = jobParentSpec(job)
@@ -1628,9 +1645,9 @@ local function executeJobAtApiary(config, site, job)
       if bee and ind then
         local genotype = Cfg.normalizeGenotype(traitList, ind.active, ind.inactive, tgt)
         if bee.role == "princess" and princessMatches(bee, spec) then
-          princesses[#princesses + 1] = { _slot = cslot, genotype = genotype }
+          princesses[#princesses + 1] = { _slot = cslot, genotype = genotype, ind = ind }
         elseif bee.role == "drone" and droneMatches(bee, spec) then
-          drones[#drones + 1] = { id = "slot" .. cslot, _slot = cslot, genotype = genotype }
+          drones[#drones + 1] = { id = "slot" .. cslot, _slot = cslot, genotype = genotype, ind = ind }
         end
       end
     end
@@ -1641,7 +1658,18 @@ local function executeJobAtApiary(config, site, job)
     return M.purityOf(traitList, a.genotype) > M.purityOf(traitList, b.genotype)
   end)
   local pSlot = princesses[1]._slot
-  local bestDrone = BB.selectBestDrone(traitList, princesses[1].genotype, drones, false, { species = 100 })
+  local bestDrone
+  -- Bank-stacking nudge: for a bank-growing job, prefer a drone whose genome is
+  -- IDENTICAL to the chosen princess. Their offspring are then that one genome and
+  -- stack into a single slot, so the bank converges toward "2 slots" (1 princess +
+  -- 1 drone stack) instead of sprawling across many near-duplicate slots. Falls back
+  -- to the normal complement-scoring when no identical drone is resident.
+  if job.type == "grow" or job.type == "growDrone" then
+    for _, d in ipairs(drones) do
+      if individualGenomeEqual(traitList, princesses[1].ind, d.ind) then bestDrone = d; break end
+    end
+  end
+  bestDrone = bestDrone or BB.selectBestDrone(traitList, princesses[1].genotype, drones, false, { species = 100 })
   local dSlot = bestDrone and bestDrone._slot
   if not pSlot or not dSlot then return "job_parents_missing_in_cargo" end
 
