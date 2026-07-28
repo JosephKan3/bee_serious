@@ -2022,11 +2022,24 @@ end
 -- separate slots), otherwise the first empty slot. getStackFn(slot)
 -- peeks that slot's raw stack (or nil if empty). Returns nil if neither
 -- a mergeable nor an empty slot exists.
+-- A slot counts as EMPTY when the block reports no stack, OR a phantom stack
+-- with no item / zero size. Some modded inventories (notably a Forestry
+-- Apiarist's Chest beyond its first GUI page) return a size-0 nameless table
+-- rather than nil for an unfilled slot; treating that as "occupied" made the
+-- robot declare storage FULL once page 1 filled even though pages 2-5 were open.
+local function slotIsEmpty(stack)
+  -- A real item ALWAYS carries an item name; an empty or phantom slot does not.
+  -- Keying on the name (rather than size) recognizes the size-0 nameless phantom
+  -- an Apiarist's Chest returns for unfilled later-page slots, without misreading
+  -- a real stack that simply omitted its size.
+  return stack == nil or stack.name == nil
+end
+
 local function findStackingSlot(getStackFn, slots, incomingStack)
   local firstEmpty = nil
   for _, slot in ipairs(slots) do
     local existing = getStackFn(slot)
-    if existing == nil then
+    if slotIsEmpty(existing) then
       firstEmpty = firstEmpty or slot
     elseif stacksMatch(existing, incomingStack) and (existing.size or 1) < (existing.maxSize or 64) then
       return slot
@@ -2054,7 +2067,7 @@ function M.forEachStorageStack(config, fn, label)
       local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
       for s = 1, size do
         local stack = invCtrl().getStackInSlot(down, s)
-        if stack then fn(pi, s, stack) end
+        if not slotIsEmpty(stack) then fn(pi, s, stack) end
       end
     end
   end
@@ -2265,6 +2278,25 @@ function M.onStorageFull(config, pending)
   Status.setStep("STORAGE FULL -- halted (free a store, then poke the robot)")
   print(string.format("[storage full] All %d storage block(s) are full; %d bee(s) have nowhere to go.",
     #M.storagePositions(config), pending and #pending or 0))
+  -- Diagnostic: per-store reported size + how many slots we actually see occupied.
+  -- If reported size < the block's real capacity (e.g. an Apiarist's Chest showing
+  -- 25 instead of 125), or occupied << size, the "full" verdict is a detection bug,
+  -- not a genuinely full network -- this line makes that visible in bee_keeper.log.
+  do
+    local down = sides().down
+    for pi, pos in ipairs(M.storagePositions(config)) do
+      if Nav.gotoXZ(pos.x, pos.z) then
+        local size = invCtrl().getInventorySize(down) or -1
+        local occupied, firstEmpty = 0, nil
+        for s = 1, (size > 0 and size or 0) do
+          if slotIsEmpty(invCtrl().getStackInSlot(down, s)) then firstEmpty = firstEmpty or s
+          else occupied = occupied + 1 end
+        end
+        print(string.format("   [store %d] size=%d occupied=%d firstEmpty=%s",
+          pi, size, occupied, tostring(firstEmpty)))
+      end
+    end
+  end
   print("   Empty or add a store, then press any key / poke the robot to continue...")
   local computer = require("computer")
   while true do

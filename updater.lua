@@ -63,6 +63,30 @@ function Updater:getLatestVersion()
   return remoteVersion
 end
 
+-- Parse a dotted version string ("0.6.16") into a list of numeric components
+-- {0, 6, 16}. Missing/garbage components read as 0.
+local function parseVersion(v)
+  local parts = {}
+  for n in tostring(v or ""):gmatch("%d+") do
+    parts[#parts + 1] = tonumber(n)
+  end
+  return parts
+end
+
+-- Semantic (per-component) comparison: returns true iff a > b.
+-- Compares component-by-component so 0.7.0 > 0.6.16 (7 > 6 wins at the minor
+-- position) instead of the old digit-strip that made "070" < "0616".
+local function versionGreater(a, b)
+  local pa, pb = parseVersion(a), parseVersion(b)
+  local n = math.max(#pa, #pb)
+  for i = 1, n do
+    local x, y = pa[i] or 0, pb[i] or 0
+    if x ~= y then return x > y end
+  end
+  return false
+end
+Updater.versionGreater = versionGreater
+
 -- Check if update is needed
 function Updater:isUpdateNeeded()
   local remoteVersion, err = self:getLatestVersion()
@@ -70,11 +94,8 @@ function Updater:isUpdateNeeded()
     return false, nil, err
   end
 
-  -- Compare program versions (remove non-digits for comparison)
-  local currentProgramVersion = self.currentVersion.programVersion:gsub("[%D]", "")
-  local latestProgramVersion = remoteVersion.programVersion:gsub("[%D]", "")
-
-  local isProgramUpdateNeeded = tonumber(latestProgramVersion) > tonumber(currentProgramVersion)
+  local isProgramUpdateNeeded =
+    versionGreater(remoteVersion.programVersion, self.currentVersion.programVersion)
 
   return isProgramUpdateNeeded, remoteVersion
 end

@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.7.0** (2026-07-27).
+> Last verified against code: **v0.7.1** (2026-07-27).
 
 ---
 
