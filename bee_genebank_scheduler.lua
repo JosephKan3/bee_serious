@@ -98,6 +98,15 @@ function M.nextJob(state)
   local function nV(sp) return (convertible[sp] or 0) >= 1 end        -- carrier PRINCESS of sp
   local function nW(sp) return (convertibleDrones[sp] or 0) >= 1 end  -- carrier DRONE of sp
 
+  -- REUSE-EVERYTHING-ELSE: a mutation parent may be a SURPLUS pure OR a hybrid
+  -- CARRIER of the needed species (a byproduct of an earlier attempt) -- never the
+  -- reserve. Preferring the byproduct over first purifying it (the old "convert
+  -- toward the base" detour) is exactly "cross the children instead of fetching a
+  -- fresh princess": a Forest-carrier princess still triggers Forest x Wintry -> Common
+  -- on its cross position, at reduced but real chance. The bank is untouched either way.
+  local function canSupplyPrincess(sp) return princessSurplus(sp) or nV(sp) end
+  local function canSupplyDrone(sp) return droneSurplus(sp) or nW(sp) end
+
   -- One job that raises X's pure PRINCESS count. Consolidate X's OWN carriers first
   -- (fix / convert -- no foreign spend); introduce a missing carrier role from a
   -- FOREIGN parent's SURPLUS (seed); create the first carriers by mutating A x B from
@@ -109,7 +118,7 @@ function M.nextJob(state)
     if haveV and h.pureDrones >= 1 then return { type = "convert", to = X } end
     if haveW and not haveV and princessSurplus(A) then return { type = "seedPrincess", species = X, princess = A } end
     if haveV and not haveW and droneSurplus(B) then return { type = "seedDrone", species = X, drone = B } end
-    if not haveV and not haveW and princessSurplus(A) and droneSurplus(B) then
+    if not haveV and not haveW and canSupplyPrincess(A) and canSupplyDrone(B) then
       return { type = "mutate", princess = A, drone = B, result = X }
     end
     return nil
@@ -126,7 +135,7 @@ function M.nextJob(state)
     if haveW and princessSurplus(X) then return { type = "growDrone", species = X } end
     if haveV and not haveW and droneSurplus(B) then return { type = "seedDrone", species = X, drone = B } end
     if haveW and not haveV and princessSurplus(A) then return { type = "seedPrincess", species = X, princess = A } end
-    if not haveV and not haveW and princessSurplus(A) and droneSurplus(B) then
+    if not haveV and not haveW and canSupplyPrincess(A) and canSupplyDrone(B) then
       return { type = "mutate", princess = A, drone = B, result = X }
     end
     return nil
@@ -141,22 +150,20 @@ function M.nextJob(state)
 
   -- Phase 1 -- base banks (deterministic order). The hard PRINCESS reserve comes
   -- first (losing it loses the base): renew from a byproduct carrier, else block for a
-  -- pristine restock. Then grow the drone bank toward its build target. A base's
-  -- princess SURPLUS is only buildable by converting a byproduct carrier against a
-  -- surplus drone; if no carrier exists yet it's left for later (byproducts supply it
-  -- as the tree runs, or the user restocks) rather than blocking.
+  -- pristine restock. Then grow the drone bank toward its build target (drone surplus
+  -- seeds the child mutations). A base's princess SURPLUS is NOT proactively built --
+  -- the old "convert toward the base" job was the churn the user flagged; with mutate
+  -- now able to spend a base CARRIER directly (canSupplyPrincess), a spare pure princess
+  -- isn't needed. Princess surplus, when it exists, comes from pristine restocks.
   for _, b in ipairs(sortedKeys(usedBase)) do
     local have = bankOf(banks, b)
-    local bp, bd = buildTarget(b)
+    local _, bd = buildTarget(b)
     if have.purePrincesses < minP then
       if nV(b) and have.pureDrones >= 1 then return { type = "convert", to = b } end
       return { type = "blocked", need = "pristine princess of '" .. b .. "'" }
     end
     if have.pureDrones < bd and have.pureDrones >= 1 then
       return { type = "grow", species = b }
-    end
-    if have.purePrincesses < bp and nV(b) and droneSurplus(b) then
-      return { type = "convert", to = b }
     end
   end
 

@@ -1465,8 +1465,14 @@ end
 -- and the in-cargo parent selection alike.
 local function jobParentSpec(job)
   if job.type == "mutate" then
+    -- Prefer a pure SURPLUS parent (higher trigger chance), but fall back to a hybrid
+    -- CARRIER of the species (pAltKey/dAltKey) -- "cross the children" rather than
+    -- fetch a fresh pure. Carriers still sit on the cross position that triggers the
+    -- mutation. Never draws the bank (fetch's pick keeps climbing jobs off bank slots).
     return { pKey = "P:" .. job.princess, pSpecies = job.princess, pVessel = false,
-             dKey = "D:" .. job.drone, dSpecies = job.drone }
+             pAllowCarrier = true, pAltKey = "V:" .. job.princess,
+             dKey = "D:" .. job.drone, dSpecies = job.drone,
+             dAllowCarrier = true, dAltKey = "W:" .. job.drone }
   elseif job.type == "grow" then
     return { pKey = "P:" .. job.species, pSpecies = job.species, pVessel = false,
              dKey = "D:" .. job.species, dSpecies = job.species }
@@ -1537,7 +1543,8 @@ local function fetchJobParents(config, job, slotsByKey)
     if readsBank then return bank end
     return nil
   end
-  local a, b = pick(spec.pKey), pick(spec.dKey)
+  local a = pick(spec.pKey) or (spec.pAltKey and pick(spec.pAltKey))
+  local b = pick(spec.dKey) or (spec.dAltKey and pick(spec.dAltKey))
   if not a then return false, "no " .. spec.pKey end
   if not b then return false, "no " .. spec.dKey end
   Status.setStep(string.format("Fetching %s + %s from storage", spec.pKey, spec.dKey))
@@ -1560,11 +1567,17 @@ end
 -- requirement matches any carrier of the allele.
 local function princessMatches(bee, spec)
   if spec.pVessel then return bee.alleles[spec.pAllele] == true end
-  return bee.pure and bee.species == spec.pSpecies
+  if bee.pure and bee.species == spec.pSpecies then return true end
+  -- mutate fallback: a hybrid carrier of the needed species is an acceptable parent
+  -- (the executor's scorer still prefers a pure one when both are resident).
+  if spec.pAllowCarrier and bee.alleles[spec.pSpecies] then return true end
+  return false
 end
 local function droneMatches(bee, spec)
   if spec.dVessel then return bee.alleles[spec.dSpecies] == true end
-  return bee.pure and bee.species == spec.dSpecies
+  if bee.pure and bee.species == spec.dSpecies then return true end
+  if spec.dAllowCarrier and bee.alleles[spec.dSpecies] then return true end
+  return false
 end
 
 -- Loads the job's two parents from cargo into the apiary and breeds them. Selects

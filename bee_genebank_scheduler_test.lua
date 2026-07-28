@@ -79,11 +79,12 @@ do
   check("base at drone reserve but below surplus target -> grow the surplus",
     j2.type == "grow" and j2.species == "Forest", j2.type)
 
-  -- Drone surplus present, princess below surplus target, carrier on hand -> convert
-  -- the byproduct against a SURPLUS drone to mint the surplus princess.
+  -- REUSE-EVERYTHING-ELSE (v0.7.3): a Forest CARRIER on hand + Wintry drone surplus,
+  -- Common not yet made -> MUTATE using the carrier as the princess parent, NOT the
+  -- old "convert toward Forest" detour that rebuilt a spare pure princess first.
   local j3 = S.nextJob(state({ Forest = b(1, 9), Wintry = b(1, 9) }, { Forest = 2 }))
-  check("base princess surplus buildable via convert (surplus drone) -> convert",
-    j3.type == "convert" and j3.to == "Forest", j3.type)
+  check("base carrier + drone surplus -> mutate (reuse the carrier), not convert-to-base",
+    j3.type == "mutate" and j3.result == "Common", j3.type .. "/" .. tostring(j3.result))
 end
 
 -- ============================================================
@@ -168,6 +169,19 @@ end
 do
   local j = S.nextJob(stateD(withReady({ Common = b(2, 8), Cultivated = b(1, 9), Noble = b(1, 0) }), {}, {}))
   check("target with 1 pure princess (no drones) counts as done", j.type == "done", j.type)
+end
+
+-- ============================================================
+-- REUSE-EVERYTHING-ELSE: drone banks already at surplus (Phase 1 satisfied), Forest
+-- PRINCESS only at reserve (no pure surplus) but a Forest CARRIER princess on hand ->
+-- mutate Common using the carrier as the princess parent, spending NO Forest reserve.
+-- (Old policy converted the carrier back to a spare pure Forest first -- the churn.)
+do
+  local banks = { Forest = b(1, 9), Wintry = b(1, 9), Common = b(0, 0) }
+  local j = S.nextJob(stateD(banks, { Forest = 1 }, {}))
+  check("princess only a carrier (drone surplus ready) -> mutate Common, reuse the carrier",
+    j.type == "mutate" and j.result == "Common", j.type .. "/" .. tostring(j.result))
+  check("carrier-mutate is not a convert-toward-base detour", j.type ~= "convert", j.type)
 end
 
 -- ============================================================

@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.7.2** (2026-07-28).
+> Last verified against code: **v0.7.3** (2026-07-28).
 
 ---
 
@@ -162,9 +162,18 @@ Consequences:
 - The **only** job allowed to use reserve bees is `grow` (pure × pure) — it conserves
   the princess (pure offspring replaces her) and nets drones. This is the sanctioned
   "breed the bank together" that mints surplus.
-- Cross-species spends (`mutate`, `seedPrincess`, `seedDrone`) take **only** a foreign
-  parent's surplus; `growDrone` (pure princess × carrier drone) fires **only** from a
-  surplus princess. A parent at its reserve is *built up first*, never drained.
+- Cross-species spends (`seedPrincess`, `seedDrone`) take **only** a foreign parent's
+  surplus; `growDrone` (pure princess × carrier drone) fires **only** from a surplus
+  princess. A parent at its reserve is *built up first*, never drained.
+- **Reuse everything else (v0.7.3):** a `mutate` parent may be a pure **surplus** OR a
+  hybrid **carrier** of the needed species (`canSupplyPrincess` / `canSupplyDrone` in the
+  scheduler; `pAllowCarrier` / `pAltKey` fetch+match fallback in the manager). Preferring
+  the byproduct carrier over first purifying it is "cross the children instead of fetching
+  a fresh princess" — a Forest-carrier princess still triggers Forest × Wintry → Common on
+  its cross position. So the scheduler no longer proactively *converts a byproduct back
+  into a spare pure base princess* (the "converting toward Forest" churn is gone); bases
+  build only their **reserve + drone surplus**, and princess surplus, if any, comes from
+  pristine restocks. Carriers are working-stock, so this never touches the bank.
 - Topological order sequences it: a parent (earlier step / base Phase 1) reaches its
   surplus before the child (later step) spends it.
 - Bases need **renewable surplus**: a base at reserve with no byproduct carrier to
