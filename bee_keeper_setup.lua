@@ -397,6 +397,26 @@ function M.run(config)
   local storagePos = storagePositions[1]
   print(string.format("Found %d bee-storage block(s).", #storagePositions))
 
+  -- Designate ONE block as the dedicated BANK chest (holds the inviolable purebred
+  -- reserve the climb never spends). Only offered when there's more than one store,
+  -- since a lone store has to hold everything. Blank keeps the older count-only
+  -- reserve protection with no physical separation.
+  local bankStoragePositions = nil
+  if #storagePositions >= 2 then
+    print("Which bee-storage block is the dedicated BANK (holds the inviolable purebred reserve)?")
+    for i, p in ipairs(storagePositions) do
+      print(string.format("  %d: (%d,%d)", i, p.x, p.z))
+    end
+    local idx = promptNumber("Bank block # (blank = no dedicated bank chest): ", true)
+    if idx and storagePositions[idx] then
+      bankStoragePositions = { storagePositions[idx] }
+      print(string.format("Bank = block %d at (%d,%d); the other %d store(s) are working.",
+        idx, storagePositions[idx].x, storagePositions[idx].z, #storagePositions - 1))
+    else
+      print("No dedicated bank chest -- using count-only reserve protection.")
+    end
+  end
+
   -- The honeydew barrel/drawer is separate storage. First one found wins.
   local honeyStoragePos = result.honeySites[1]
   if #result.honeySites > 1 then
@@ -411,6 +431,7 @@ function M.run(config)
   end
 
   local saved = { sites = sites, storagePositions = storagePositions, storagePos = storagePos,
+    bankStoragePositions = bankStoragePositions,
     honeyStoragePos = honeyStoragePos, trashPos = trashPos, width = width, depth = depth }
   saveFile(M.SITES_FILE, saved)
   print(string.format("Saved %d apiary site(s), %d bee-storage block(s)%s%s to %s.",

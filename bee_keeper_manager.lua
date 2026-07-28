@@ -1160,31 +1160,35 @@ local function newCensus()
     c.summary[sp] = c.summary[sp] or { purePrincesses = 0, pureDrones = 0 }
     return c.summary[sp]
   end
-  local function addSlot(key, loc, slot)
+  local function addSlot(key, loc, slot, isBank)
     c.slotsByKey[key] = c.slotsByKey[key] or {}
-    table.insert(c.slotsByKey[key], { pos = loc, slot = slot })
+    table.insert(c.slotsByKey[key], { pos = loc, slot = slot, bank = isBank or nil })
   end
-  function c.add(loc, slot, stack)
+  -- `isBank` marks a slot living in a dedicated BANK store: it still counts toward
+  -- the species' reserve total (summary), but is tagged so the climb's fetch skips
+  -- it -- only `grow` may draw the bank pair. Pure counts fold bank+working together
+  -- so the scheduler's surplus math (total > reserve) is unchanged.
+  function c.add(loc, slot, stack, isBank)
     local bee = classifyBee(stack)
     if not bee then return end
     if bee.role == "princess" and bee.pure then
       rec(bee.species).purePrincesses = rec(bee.species).purePrincesses + bee.size
-      addSlot("P:" .. bee.species, loc, slot)
+      addSlot("P:" .. bee.species, loc, slot, isBank)
     elseif bee.role == "princess" then -- hybrid: carrier fodder toward either allele
       for allele in pairs(bee.alleles) do
         c.convertible[allele] = (c.convertible[allele] or 0) + bee.size
-        addSlot("V:" .. allele, loc, slot)
+        addSlot("V:" .. allele, loc, slot, isBank)
       end
     elseif bee.role == "drone" and bee.pure then
       rec(bee.species).pureDrones = rec(bee.species).pureDrones + bee.size
-      addSlot("D:" .. bee.species, loc, slot)
+      addSlot("D:" .. bee.species, loc, slot, isBank)
     elseif bee.role == "drone" then -- hybrid DRONE: carrier fodder for consolidation
       -- Tracked (was ignored): a mutation yields hybrid drones too, and breeding
       -- a carrier princess x carrier drone of the same allele is the ONLY way to
       -- bootstrap the first PURE of a mutated species (~25% pure offspring).
       for allele in pairs(bee.alleles) do
         c.convertibleDrones[allele] = (c.convertibleDrones[allele] or 0) + bee.size
-        addSlot("W:" .. allele, loc, slot)
+        addSlot("W:" .. allele, loc, slot, isBank)
       end
     end
   end
@@ -1198,7 +1202,9 @@ end
 function M.scanStorageCensus(config)
   if #M.storagePositions(config) == 0 then return {}, {}, {}, {} end
   local c = newCensus()
-  M.forEachStorageStack(config, function(pos, slot, stack) c.add(pos, slot, stack) end, "Scanning storage")
+  M.forEachStorageStack(config, function(pos, slot, stack)
+    c.add(pos, slot, stack, M.isBankStore(config, pos))
+  end, "Scanning storage")
   config._bankCensus = c.summary
   config._bankConvertible = c.convertible
   config._bankConvertibleDrones = c.convertibleDrones
@@ -1512,11 +1518,24 @@ end
 local function fetchJobParents(config, job, slotsByKey)
   local spec = jobParentSpec(job)
   if not spec then return false, "unknown_job_type" end
+  -- BANK stores hold the inviolable reserve. The climb never draws from them; only
+  -- `grow` (breed the bank pair to mint surplus) is allowed to -- and prefers to.
+  local readsBank = (job.type == "grow")
   local function pick(key)
     local l = slotsByKey[key]
     if not l or #l == 0 then return nil end
-    for _, e in ipairs(l) do if e.pos == "cargo" then return e end end -- prefer resident
-    return l[1]
+    -- Resident cargo first (no travel), then working stores. Bank slots are
+    -- excluded for every climbing job; only `grow` may take them (last resort,
+    -- after cargo/working, so a spare surplus is spent before the reserve).
+    local working, bank = nil, nil
+    for _, e in ipairs(l) do
+      if e.pos == "cargo" then return e
+      elseif e.bank then bank = bank or e
+      else working = working or e end
+    end
+    if working then return working end
+    if readsBank then return bank end
+    return nil
   end
   local a, b = pick(spec.pKey), pick(spec.dKey)
   if not a then return false, "no " .. spec.pKey end
@@ -2078,13 +2097,15 @@ end
 -- aware stacking, then first empty). Returns dropped, pending -- pending are the
 -- entries that had NOWHERE to go (every store full). Leaves the robot at the last
 -- store it needed.
-function M.depositBeesAcrossStores(config, entries)
-  local positions = M.storagePositions(config)
+-- Deposit `entries` into a specific ORDERED list of stores (each { index=<network
+-- idx>, pos={x,z} }), filling one before spilling into the next. Returns dropped,
+-- pending (entries that found nowhere). Shared by both the routed and unrouted paths.
+local function depositIntoStoreList(config, entries, storeList)
   local down = sides().down
   local dropped, pending = 0, entries
-  for pi, pos in ipairs(positions) do
+  for _, se in ipairs(storeList) do
     if #pending == 0 then break end
-    if Nav.gotoXZ(pos.x, pos.z) then
+    if Nav.gotoXZ(se.pos.x, se.pos.z) then
       local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
       local candidateSlots = {}
       for s = 1, size do candidateSlots[s] = s end
@@ -2098,7 +2119,7 @@ function M.depositBeesAcrossStores(config, entries)
           agent().select(e._slot)
           if invCtrl().dropIntoSlot(down, slot) then
             dropped = dropped + 1
-            M.censusApplyStack(config, pi, slot, incoming, moved, false) -- keep cache current
+            M.censusApplyStack(config, se.index, slot, incoming, moved, false) -- keep cache current
           else
             rest[#rest + 1] = e
           end
@@ -2110,6 +2131,69 @@ function M.depositBeesAcrossStores(config, entries)
     end
   end
   return dropped, pending
+end
+
+-- Route each cargo bee to a destination store, then deposit. With a dedicated bank
+-- configured, PURE bees top the bank up to the per-species reserve (minP princesses
+-- + minD drones) FIRST; every surplus pure and every HYBRID goes to the working
+-- stores. Without a bank configured, all bees flow across the whole network in order
+-- (the original behavior). Returns dropped, pending.
+function M.depositBeesAcrossStores(config, entries)
+  local allStores = {}
+  for i, pos in ipairs(M.storagePositions(config)) do allStores[#allStores + 1] = { index = i, pos = pos } end
+
+  if #M.bankStoragePositions(config) == 0 then
+    return depositIntoStoreList(config, entries, allStores)
+  end
+
+  local bankStores, workingStores = {}, {}
+  for _, se in ipairs(allStores) do
+    if M.isBankStore(config, se.index) then bankStores[#bankStores + 1] = se
+    else workingStores[#workingStores + 1] = se end
+  end
+
+  -- Remaining reserve capacity per species, seeded from what the bank already holds,
+  -- so a pure only tops the bank while it's still short of reserve.
+  local minP, minD = GB.minPrincesses(config.genebank), GB.minDrones(config.genebank)
+  local roomP, roomD = {}, {}
+  do
+    local bankCensus = newCensus()
+    local down = sides().down
+    for _, se in ipairs(bankStores) do
+      if Nav.gotoXZ(se.pos.x, se.pos.z) then
+        local size = invCtrl().getInventorySize(down) or config.storageSlotCount or 54
+        for s = 1, size do bankCensus.add(se.index, s, invCtrl().getStackInSlot(down, s), true) end
+      end
+    end
+    for sp, s in pairs(bankCensus.summary) do
+      roomP[sp] = math.max(0, minP - (s.purePrincesses or 0))
+      roomD[sp] = math.max(0, minD - (s.pureDrones or 0))
+    end
+  end
+
+  -- Partition: a pure bee whose reserve is still short -> bank (decrement room);
+  -- everything else (surplus pure, any hybrid) -> working stores.
+  local toBank, toWorking = {}, {}
+  for _, e in ipairs(entries) do
+    local bee = classifyBee(invCtrl().getStackInInternalSlot(e._slot))
+    local goesBank = false
+    if bee and bee.pure then
+      if bee.role == "princess" and (roomP[bee.species] or minP) > 0 then
+        roomP[bee.species] = (roomP[bee.species] or minP) - 1; goesBank = true
+      elseif bee.role == "drone" and (roomD[bee.species] or minD) > 0 then
+        roomD[bee.species] = (roomD[bee.species] or minD) - 1; goesBank = true
+      end
+    end
+    if goesBank then toBank[#toBank + 1] = e else toWorking[#toWorking + 1] = e end
+  end
+
+  local d1, p1 = depositIntoStoreList(config, toBank, bankStores)
+  -- A bank-routed bee that didn't fit (bank store full) spills into working too.
+  local spill = {}
+  for _, e in ipairs(p1) do spill[#spill + 1] = e end
+  for _, e in ipairs(toWorking) do spill[#spill + 1] = e end
+  local d2, p2 = depositIntoStoreList(config, spill, workingStores)
+  return d1 + d2, p2
 end
 
 -- Forestry apiaries expose product/offspring output (combs, drones, the
@@ -2264,6 +2348,37 @@ function M.storagePositions(config)
   end
   if config.storagePos then return { config.storagePos } end
   return {}
+end
+
+-- The dedicated BANK store positions (config.bankStoragePositions), or {} when
+-- physical separation isn't configured (falls back to count-only reserve).
+function M.bankStoragePositions(config)
+  return config.bankStoragePositions or {}
+end
+
+-- Is the store at network index `posIndex` (into M.storagePositions) a BANK store?
+-- Bank stores are matched by {x,z} identity against config.bankStoragePositions,
+-- so ordering in either list is irrelevant.
+function M.isBankStore(config, posIndex)
+  local banks = M.bankStoragePositions(config)
+  if #banks == 0 then return false end
+  local pos = M.storagePositions(config)[posIndex]
+  if not pos then return false end
+  for _, b in ipairs(banks) do
+    if b.x == pos.x and b.z == pos.z then return true end
+  end
+  return false
+end
+
+-- The WORKING store positions (network minus the bank stores), paired with their
+-- network index so callers can address them the same way M.storagePositions does.
+-- Surplus pures and all hybrids live here; the climb fetches parents only from here.
+function M.workingStorageEntries(config)
+  local out = {}
+  for i, pos in ipairs(M.storagePositions(config)) do
+    if not M.isBankStore(config, i) then out[#out + 1] = { index = i, pos = pos } end
+  end
+  return out
 end
 
 -- STORAGE FULL handler: every storage block is full and `pending` bees have

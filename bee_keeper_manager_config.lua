@@ -181,6 +181,18 @@ return {
   --   storagePositions = { { x = -6, z = -6 }, { x = -6, z = -8 }, { x = -6, z = -10 } },
   storagePositions = nil,
 
+  -- The dedicated BANK store(s): a subset of the storage network (same {x,z}
+  -- shape, must also appear in storagePositions) reserved for the inviolable
+  -- purebred BANK -- the reserve pures the climb must never spend. Deposit tops
+  -- these up to the per-species reserve (minPrincesses + minDrones) FIRST; every
+  -- surplus pure and every hybrid goes to the WORKING stores instead. The climb
+  -- fetches parents only from the working stores; the one job that reads the bank
+  -- is `grow` (breed the bank pair to mint surplus drones into the working area,
+  -- returning the pristine princess to the bank). Leave nil to keep the older
+  -- count-only reserve protection with no physical separation.
+  --   bankStoragePositions = { { x = -6, z = -6 } },
+  bankStoragePositions = nil,
+
   -- sites gets filled in by bee_keeper_manager_run.lua from the persisted
   -- scan + siteOverrides above (see M.loadSites) -- leave nil here.
   sites = nil,

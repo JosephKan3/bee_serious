@@ -143,6 +143,7 @@ local function main(args)
   -- Bee-storage network (autoscanned): the whole list of stores, falling back to
   -- the single legacy storagePos. Honey drawer/barrel is a SEPARATE scanned block.
   config.storagePositions = config.storagePositions or saved.storagePositions
+  config.bankStoragePositions = config.bankStoragePositions or saved.bankStoragePositions
   config.storagePos = config.storagePos or saved.storagePos
   config.honeyStoragePos = config.honeyStoragePos or saved.honeyStoragePos
   config.trashPos = config.trashPos or saved.trashPos

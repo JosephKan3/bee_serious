@@ -18,7 +18,7 @@
 > robot without re-deriving control flow from ~3k lines of Lua, and it's the
 > reference we check pathing/breeding complaints against.
 >
-> Last verified against code: **v0.7.1** (2026-07-27).
+> Last verified against code: **v0.7.2** (2026-07-28).
 
 ---
 
@@ -181,6 +181,25 @@ invariant is covered by `bee_genebank_scheduler_test.lua`.
 offspring. The first pure of a species is bootstrapped from two carriers (`fix`, ~25%
 pure); `grow`/`convert` then build the bank, and only surplus climbs. Slower than the
 old aggressive spend, but it never throws a purebred away.
+
+#### Physical BANK CHEST (v0.7.2 — optional, on top of the count invariant)
+
+When `config.bankStoragePositions` names one (or more) of the storage blocks as the
+dedicated **bank chest**, the reserve is separated *physically*, not just by count:
+
+- **Deposit routing** (`depositBeesAcrossStores`): a pure bee tops the bank up to the
+  per-species reserve (`minP` princesses + `minD` drones) **first**; every **surplus
+  pure and every hybrid** goes to the **working stores**. Hybrids never enter the bank.
+- **Fetch restriction** (`fetchJobParents` → `pick`): the census tags each fetch-index
+  slot with `bank=true`/nil. Every climbing job draws **only** from working (or resident
+  cargo) slots — the bank is skipped. The **one** job allowed to read the bank is `grow`,
+  which breeds the bank pair to mint surplus drones into the working stores and returns
+  the pristine princess to the bank ("breed from the bank to get more drones").
+- The scheduler's surplus math is **unchanged** — pure counts still fold bank + working
+  together, so `total > reserve` still gates every spend. The chest just guarantees the
+  reserve is never the copy that gets fetched. Leave `bankStoragePositions` nil to keep
+  count-only protection. Setup (`bee_keeper_setup`) prompts which block is the bank.
+  Tests: `bee_storage_bankchest_test.lua`.
 
 ### Special-condition gate (mutation)
 
